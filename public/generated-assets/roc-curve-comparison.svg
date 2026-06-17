@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="620" viewBox="0 0 820 620" role="img">
+  <defs>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#111827"/>
+    </marker>
+  </defs>
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  
+  <line x1="115" y1="500" x2="710" y2="500" stroke="#111827" stroke-width="5" marker-end="url(#arrow)"/>
+  <line x1="115" y1="500" x2="115" y2="85" stroke="#111827" stroke-width="5" marker-end="url(#arrow)"/>
+  <line x1="115" y1="500" x2="675" y2="115" stroke="#9ca3af" stroke-width="4" stroke-dasharray="10 10"/>
+  <path d="M 115 500 C 150 315 250 185 405 125 C 515 82 610 78 680 75" fill="none" stroke="#16a34a" stroke-width="8"/>
+  <path d="M 115 500 C 195 410 315 335 470 278 C 585 235 645 180 680 140" fill="none" stroke="#dc2626" stroke-width="8"/>
+  <text x="344" y="560" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="800" fill="#111827">False positive rate</text>
+  <text x="20" y="330" transform="rotate(-90 20 330)" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="800" fill="#111827">True positive rate</text>
+  <rect x="475" y="360" width="230" height="92" rx="8" fill="#ffffff" stroke="#d1d5db"/>
+  <line x1="500" y1="390" x2="560" y2="390" stroke="#16a34a" stroke-width="7"/>
+  <text x="575" y="398" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#111827">clf1</text>
+  <line x1="500" y1="425" x2="560" y2="425" stroke="#dc2626" stroke-width="7"/>
+  <text x="575" y="433" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#111827">clf2</text>
+</svg>

@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["isCorrect", "score", "verdict", "explanation", "concepts", "nextPrompt"],
+  "properties": {
+    "isCorrect": {
+      "type": "boolean"
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "verdict": {
+      "type": "string"
+    },
+    "explanation": {
+      "type": "string"
+    },
+    "concepts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nextPrompt": {
+      "type": "string"
+    }
+  }
+}

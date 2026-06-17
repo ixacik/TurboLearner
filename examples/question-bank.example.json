@@ -1,0 +1,84 @@
+{
+  "schema": {
+    "version": 2,
+    "schemaRef": "schemas/question-bank.schema.json",
+    "description": "Example TurboLearner question bank.",
+    "contentTags": {
+      "math": "<math>x^2</math> for inline LaTeX, or <math display>...</math> for display equations",
+      "image": "<image>/absolute/local/path.png</image> or <image>https://...</image>",
+      "code": "<code lang=\"python\">...</code>; use lang=\"mermaid\" for generated diagrams"
+    }
+  },
+  "generatedAt": "2026-06-17T00:00:00.000Z",
+  "sets": [
+    {
+      "id": "example-exam",
+      "title": "Example Exam",
+      "description": "Copy this shape when adding a new exam.",
+      "sourcePath": "examples/question-bank.example.json",
+      "questions": [
+        {
+          "id": "example-exam-q1",
+          "setId": "example-exam",
+          "source": "Example Exam",
+          "number": "1",
+          "title": "Single MCQ",
+          "type": "single",
+          "prompt": "Which model type predicts a continuous value?",
+          "points": 1,
+          "options": [
+            { "id": "A", "text": "Classification" },
+            { "id": "B", "text": "Regression" },
+            { "id": "C", "text": "Clustering" },
+            { "id": "D", "text": "Association rule mining" }
+          ],
+          "answer": {
+            "correctOptionIds": ["B"],
+            "expectedText": null,
+            "source": "provided"
+          },
+          "concepts": ["regression"]
+        },
+        {
+          "id": "example-exam-q2",
+          "setId": "example-exam",
+          "source": "Example Exam",
+          "number": "2",
+          "title": "Multi-Select",
+          "type": "multiple",
+          "prompt": "Select all statements that are true about PCA. Inline math works like <math>P(Y | X)</math>.",
+          "points": 1,
+          "options": [
+            { "id": "A", "text": "It can reduce dimensionality." },
+            { "id": "B", "text": "It preserves as much variance as possible in early components." },
+            { "id": "C", "text": "It uses class labels to maximize separation." },
+            { "id": "D", "text": "It always selects original features." }
+          ],
+          "answer": {
+            "correctOptionIds": ["A", "B"],
+            "expectedText": null,
+            "source": "provided"
+          },
+          "concepts": ["pca", "features"]
+        },
+        {
+          "id": "example-exam-q3",
+          "setId": "example-exam",
+          "source": "Example Exam",
+          "number": "3",
+          "title": "Open Question With Structured Content",
+          "type": "open",
+          "prompt": "Explain what this code calculates:\n\n<code lang=\"python\">\ndef precision(tp, fp):\n    return tp / (tp + fp)\n</code>\n\nDisplay math works too:\n\n<math display>\\mathrm{precision}=\\frac{TP}{TP+FP}</math>\n\nImages use local or remote paths:\n\n<image>/absolute/path/to/question-image.png</image>",
+          "points": 2,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": "Precision is the proportion of predicted positives that are true positives.",
+            "source": "provided"
+          },
+          "concepts": ["metrics"]
+        }
+      ]
+    }
+  ]
+}

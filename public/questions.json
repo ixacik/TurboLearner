@@ -1,0 +1,1881 @@
+{
+  "schema": {
+    "version": 2,
+    "schemaRef": "schemas/question-bank.schema.json",
+    "description": "Question bank for TurboLearner. Each question has an explicit type, prompt content with structured tags, options when applicable, and an answer object. The UI renders <math>, <image>, and <code> tags into KaTeX, local/remote images, and highlighted code blocks.",
+    "contentTags": {
+      "math": "<math>x^2</math> for inline LaTeX, or <math display>...</math> for display equations",
+      "image": "<image>/absolute/local/path.png</image> or <image>https://...</image>",
+      "code": "<code lang=\"python\">...</code>; use lang=\"mermaid\" for generated diagrams"
+    },
+    "question": {
+      "id": "stable string id",
+      "setId": "id of parent set",
+      "source": "human source label",
+      "number": "exam question number as text",
+      "title": "short display title",
+      "type": "single | multiple | open",
+      "prompt": "markdown prompt text with optional <math>, <image>, and <code> structured tags",
+      "points": "optional numeric point value",
+      "options": [
+        {
+          "id": "A",
+          "text": "markdown option text with optional <math>...</math> tags"
+        }
+      ],
+      "answer": {
+        "correctOptionIds": "array when an answer key is known, otherwise null",
+        "expectedText": "string for open questions when an answer key is known, otherwise null",
+        "source": "provided | inferred | missing"
+      },
+      "correctOptionIds": "legacy optional array mirrored from answer.correctOptionIds when known",
+      "groupId": "optional stable id when this question is part of a shared-context group",
+      "groupTitle": "optional title for a shared-context group",
+      "groupPrompt": "optional shared prompt rendered once above grouped subquestions",
+      "groupOrder": "optional 0-based order within a shared-context group",
+      "concepts": "optional tags used for review and generation"
+    }
+  },
+  "generatedAt": "2026-06-17T09:21:22.693Z",
+  "sets": [
+    {
+      "id": "practice-exam",
+      "title": "Practice Exam",
+      "description": "Machine Learning BSc practice exam, 2024-2025.",
+      "sourcePath": "/Users/plevi/ML-Exam/practice_exam_questions.md",
+      "questions": [
+        {
+          "id": "practice-exam-q1",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "1",
+          "title": "Question 1",
+          "type": "single",
+          "prompt": "While purchasing a new washing machine in an online store, you are recommended to buy connection pipes and detergents. This is an example of which of the following tasks?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Subgroup Discovery"
+            },
+            {
+              "id": "B",
+              "text": "Association rule mining"
+            },
+            {
+              "id": "C",
+              "text": "Descriptive clustering"
+            },
+            {
+              "id": "D",
+              "text": "Predictive clustering"
+            },
+            {
+              "id": "E",
+              "text": "Regression"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q2",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "2",
+          "title": "Question 2",
+          "type": "single",
+          "prompt": "Which statement is true about grading models?",
+          "points": 1.25,
+          "options": [
+            {
+              "id": "A",
+              "text": "Linear regression is an example of a grading model."
+            },
+            {
+              "id": "B",
+              "text": "They create segments within the instance space."
+            },
+            {
+              "id": "C",
+              "text": "They have a fixed and a finite resolution."
+            },
+            {
+              "id": "D",
+              "text": "Tree-based models are examples of grading models."
+            },
+            {
+              "id": "E",
+              "text": "SVM is an example of grading models"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q3",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "3",
+          "title": "Question 3",
+          "type": "single",
+          "prompt": "Which statement is true about probabilistic models?",
+          "points": 1.25,
+          "options": [
+            {
+              "id": "A",
+              "text": "Likelihood ratio is the product of posterior odds and prior odds."
+            },
+            {
+              "id": "B",
+              "text": "Posterior odds is the product of likelihood ratio and prior odds."
+            },
+            {
+              "id": "C",
+              "text": "In a classification task, the prior probability refers to our prior knowledge about the value of features."
+            },
+            {
+              "id": "D",
+              "text": "It is preferred to use the likelihood ratio when it cannot be assumed that the prior distribution is uniform."
+            },
+            {
+              "id": "E",
+              "text": "Maximum a posteriori is used to face the overfitting problem"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q4",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "4",
+          "title": "Question 4",
+          "type": "single",
+          "prompt": "Sometimes, separate \"training, test, and validation\" sets are used in cross-validation. What is the validation set used for?",
+          "points": 1.25,
+          "options": [
+            {
+              "id": "A",
+              "text": "To make predictions during the inference phase"
+            },
+            {
+              "id": "B",
+              "text": "To evaluate the final model accuracy after all training and tuning is complete."
+            },
+            {
+              "id": "C",
+              "text": "For evaluation of the classifications made by the model using numerous performance metrics."
+            },
+            {
+              "id": "D",
+              "text": "To monitor model performance during training and help select the best model."
+            },
+            {
+              "id": "E",
+              "text": "For finetuning hyper-parameters on a separate set than the train/test"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "experiments"
+          ]
+        },
+        {
+          "id": "practice-exam-q5",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "5",
+          "title": "Question 5",
+          "type": "multiple",
+          "prompt": "Which one(s) among the following is considered a property of decision trees?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The basic decision tree algorithm is highly resistant to overfitting."
+            },
+            {
+              "id": "B",
+              "text": "It takes longer to train a decision tree model than to perform inference with it"
+            },
+            {
+              "id": "C",
+              "text": "They require extensive data preprocessing like feature scaling."
+            },
+            {
+              "id": "D",
+              "text": "They can be applied on both categorical and numerical data"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "decision-trees"
+          ]
+        },
+        {
+          "id": "practice-exam-q6",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "6",
+          "title": "Question 6",
+          "type": "multiple",
+          "prompt": "Select the option(s) that are true about one-versus-one classifiers.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The \"one-versus-one\" strategy can be applied in combination with binary classifiers like SVM."
+            },
+            {
+              "id": "B",
+              "text": "One model is trained per class, distinguishing between that class and all others."
+            },
+            {
+              "id": "C",
+              "text": "The training data is split so that each binary classifier only sees examples from two classes."
+            },
+            {
+              "id": "D",
+              "text": "A separate binary classifier is trained for every possible pair of classes."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q7",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "7",
+          "title": "Question 7",
+          "type": "single",
+          "prompt": "The figure below shows a decision boundary learned by a classifier based on two features, F1 and F2, shown on the two axes. Considering the bias and variance terms of the error, the following classifier:\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-85d11cb3-dc4b-4791-9dc1-069592f48ef1.png</image>",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Has high variance and low bias"
+            },
+            {
+              "id": "B",
+              "text": "Has low bias and low variance"
+            },
+            {
+              "id": "C",
+              "text": "Has high bias and high variance"
+            },
+            {
+              "id": "D",
+              "text": "Has high bias and low variance"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [
+            "/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-85d11cb3-dc4b-4791-9dc1-069592f48ef1.png"
+          ],
+          "concepts": [
+            "metrics",
+            "xai",
+            "features"
+          ]
+        },
+        {
+          "id": "practice-exam-q8",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "8",
+          "title": "Question 8",
+          "type": "single",
+          "prompt": "Which one of the following shows that the binary classifier clf1 outperforms clf2?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The area under the ROC curve of clf1 is lower than that of clf2."
+            },
+            {
+              "id": "B",
+              "text": "The RMSE of clf1 is lower than that of clf2."
+            },
+            {
+              "id": "C",
+              "text": "The R^2 of clf1 is higher than that of clf2."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "metrics"
+          ]
+        },
+        {
+          "id": "practice-exam-q9",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "9",
+          "title": "Question 9",
+          "type": "single",
+          "prompt": "Imagine the following dataset with only one numerical feature, demonstrated on the x-axis, and two class labels (-, +). Which technique can find a decision boundary that can classify this dataset perfectly?\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c200ca87-4af2-4410-b085-dda7945fd2cc.png</image>",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "A linear margin-maximizing classifier, like the SVM, in combination with a kernel."
+            },
+            {
+              "id": "B",
+              "text": "A linear regression model."
+            },
+            {
+              "id": "C",
+              "text": "A decision tree."
+            },
+            {
+              "id": "D",
+              "text": "Expectation-maximization with two normal distributions, one for \"+\" and one for \"-\"."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [
+            "/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c200ca87-4af2-4410-b085-dda7945fd2cc.png"
+          ],
+          "concepts": [
+            "features"
+          ]
+        },
+        {
+          "id": "practice-exam-q10",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "10",
+          "title": "Question 10",
+          "type": "single",
+          "prompt": "Which of the following is true for linear models?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Linear models are parametric."
+            },
+            {
+              "id": "B",
+              "text": "They are stable and not affected by variations in data."
+            },
+            {
+              "id": "C",
+              "text": "Linear models are prone to overfitting."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "linear-models"
+          ]
+        },
+        {
+          "id": "practice-exam-q11",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "11",
+          "title": "Question 11",
+          "type": "multiple",
+          "prompt": "The effectiveness of an SVM classifier depends upon:",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Selection of kernels"
+            },
+            {
+              "id": "B",
+              "text": "Soft margin complexity hyperparameter C"
+            },
+            {
+              "id": "C",
+              "text": "The model's ability to avoid regularization altogether."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "linear-models"
+          ]
+        },
+        {
+          "id": "practice-exam-q12",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "12",
+          "title": "Question 12",
+          "type": "single",
+          "prompt": "What can principal components analysis (PCA) be used for?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Identifying the principal features used by a classification algorithm to perform a classification task."
+            },
+            {
+              "id": "B",
+              "text": "For feature selection among categorical and numerical features"
+            },
+            {
+              "id": "C",
+              "text": "Reducing the dimensionality of the data while preserving as much variance as possible."
+            },
+            {
+              "id": "D",
+              "text": "Finding the best clusters among data."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "features"
+          ]
+        },
+        {
+          "id": "practice-exam-q13",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "13",
+          "title": "Question 13",
+          "type": "multiple",
+          "prompt": "Which of the following are not an example of an ensemble learning algorithm?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Random Forest"
+            },
+            {
+              "id": "B",
+              "text": "Adaboost"
+            },
+            {
+              "id": "C",
+              "text": "Decision Trees"
+            },
+            {
+              "id": "D",
+              "text": "Gradient Boosting"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q14",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "14",
+          "title": "Question 14",
+          "type": "single",
+          "prompt": "Which one of the following is more probable for a right-skewed distribution?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Mean < Median < Mode"
+            },
+            {
+              "id": "B",
+              "text": "Mode < Mean < Median"
+            },
+            {
+              "id": "C",
+              "text": "Mode < Median < Mean"
+            },
+            {
+              "id": "D",
+              "text": "Mean = Median = Mode"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q15",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "15",
+          "title": "Question 15",
+          "type": "single",
+          "prompt": "After training a linear classifier to make a distinction between two classes based on a single feature, you realize a large amount of error. What is the best strategy to reduce the error without using a different machine learning algorithm?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Sub-space sampling"
+            },
+            {
+              "id": "B",
+              "text": "Stacking"
+            },
+            {
+              "id": "C",
+              "text": "Bagging"
+            },
+            {
+              "id": "D",
+              "text": "Boosting"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "linear-models",
+            "features"
+          ]
+        },
+        {
+          "id": "practice-exam-q16",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "16",
+          "title": "Question 16",
+          "type": "multiple",
+          "prompt": "Neural Networks:",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Are trained through an optimization approach on a convex surface formed based on the loss function."
+            },
+            {
+              "id": "B",
+              "text": "Always output values between 0 and 1"
+            },
+            {
+              "id": "C",
+              "text": "Can be used for regression as well as classification"
+            },
+            {
+              "id": "D",
+              "text": "Can be used in an ensemble"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "neural-networks"
+          ]
+        },
+        {
+          "id": "practice-exam-q17",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "17",
+          "title": "Question 17",
+          "type": "single",
+          "prompt": "Which one of the following activation functions is suitable for the last layer of a feedforward neural network that is trained for multi-class classification?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Softmax"
+            },
+            {
+              "id": "B",
+              "text": "Linear"
+            },
+            {
+              "id": "C",
+              "text": "Sigmoid"
+            },
+            {
+              "id": "D",
+              "text": "Tanh"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "neural-networks"
+          ]
+        },
+        {
+          "id": "practice-exam-q18",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "18",
+          "title": "Question 18",
+          "type": "single",
+          "prompt": "Which test can be used to compare the performance of multiple algorithms over multiple datasets?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Friedman test"
+            },
+            {
+              "id": "B",
+              "text": "Stratified cross-validation"
+            },
+            {
+              "id": "C",
+              "text": "Null hypothesis"
+            },
+            {
+              "id": "D",
+              "text": "T-test"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q20",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "20",
+          "title": "Question 20",
+          "type": "multiple",
+          "prompt": "A company designs a machine learning model to process the CVs of job applicants. Which of the following statements are highly probably to happen?",
+          "points": 0,
+          "options": [
+            {
+              "id": "A",
+              "text": "The use of the model can reduce human bias and result in fairer hiring decisions."
+            },
+            {
+              "id": "B",
+              "text": "The model may inherit biases from historical data, leading to discrimination against certain groups of applicants."
+            },
+            {
+              "id": "C",
+              "text": "The model will always be completely neutral and objective in its evaluation of applicants."
+            },
+            {
+              "id": "D",
+              "text": "The model will always make more accurate decisions than human recruiters."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "roc"
+          ]
+        },
+        {
+          "id": "practice-exam-q21",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "21",
+          "title": "Question 21",
+          "type": "open",
+          "prompt": "Explain what you know about \"the curse of dimensionality\".",
+          "points": 2,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "xai",
+            "features"
+          ]
+        },
+        {
+          "id": "practice-exam-q22",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "22",
+          "title": "Question 22",
+          "type": "open",
+          "prompt": "Explain bagging and boosting approaches. What is the difference between these methods in terms of bias and variance?",
+          "points": 3,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "ensembles",
+            "xai"
+          ]
+        },
+        {
+          "id": "practice-exam-q23",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "23",
+          "title": "Question 23",
+          "type": "open",
+          "prompt": "Suppose a classification problem where one of the possible outcomes is extremely uncommon. Would you prefer to use MAP or MLE in this case? Why?",
+          "points": 2,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "bayesian"
+          ]
+        },
+        {
+          "id": "practice-exam-q23a",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "23a",
+          "title": "Question 23a",
+          "type": "open",
+          "prompt": "Here is a simple perturbation-based explainer algorithm, similar to the LIME algorithm. This algorithm contains the steps to train a surrogate model <math>g</math> for a specific sample <math>x</math>. This sample comes from the initial dataset <math>X = {x_1, ..., x, ..., x_n}</math>.\n\nIn a similar fashion to the LIME algorithm, we make use of K-Lasso to train a simple linear surrogate model, and we return the weights <math>w</math> as an explanation to the input features.\n\n\nWith the function <code>sample_around</code> to generate new samples in the neighbourhood of the interpretable version <math>x'</math> of the original input <math>x</math>.\n\nIs there any issue with the proposed Algorithm 1? Explain your answer.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-4d9aab32-1435-4187-8066-bcceaed15072.png</image>",
+          "points": 1,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [
+            "/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-4d9aab32-1435-4187-8066-bcceaed15072.png"
+          ],
+          "concepts": [
+            "linear-models",
+            "xai",
+            "features"
+          ]
+        },
+        {
+          "id": "practice-exam-q23b",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "23b",
+          "title": "Question 23b",
+          "type": "open",
+          "prompt": "What are the two drawbacks of the original LIME algorithm?",
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "xai"
+          ]
+        },
+        {
+          "id": "practice-exam-q23c",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "23c",
+          "title": "Question 23c",
+          "type": "multiple",
+          "prompt": "Which of the following statements are valid:",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "LIME is a model-specific method"
+            },
+            {
+              "id": "B",
+              "text": "The LIME algorithm does not take into account the complexity of the black-box model."
+            },
+            {
+              "id": "C",
+              "text": "Probing and LIME is part of the local explanations category in xAI"
+            },
+            {
+              "id": "D",
+              "text": "LIME explanations are generated after the training of the black-box model"
+            },
+            {
+              "id": "E",
+              "text": "The LIME algorithm does not take into account the complexity of the surrogate model."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "practice-exam-q26",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "26",
+          "title": "Question 26",
+          "type": "multiple",
+          "prompt": "A data scientist in a telecom company is using a decision tree to perform a binary classification by predicting which customers will stop their subscription in the next 6 months. The first model trained has a very low accuracy on a validation set. Which of the following options will potentially help improving the accuracy of the model on an unseen test set? Select all that apply.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Collecting more labelled data for training."
+            },
+            {
+              "id": "B",
+              "text": "Hyperparameter tuning."
+            },
+            {
+              "id": "C",
+              "text": "Normalising the numerical features."
+            },
+            {
+              "id": "D",
+              "text": "Reduced error pruning."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "metrics",
+            "decision-trees",
+            "experiments"
+          ]
+        },
+        {
+          "id": "practice-exam-q25a",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "25a",
+          "title": "Question 25a",
+          "type": "open",
+          "prompt": "Is it a good idea to use this code to split your decision tree? If not, what is the issue?",
+          "points": 2,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "decision-trees"
+          ]
+        },
+        {
+          "id": "practice-exam-q25b",
+          "setId": "practice-exam",
+          "source": "Practice Exam",
+          "number": "25b",
+          "title": "Question 25b",
+          "type": "open",
+          "prompt": "Now, you are trying to decide which impurity function to use. What are, in general, the main differences between entropy and the square root of Gini index?",
+          "points": 1,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "decision-trees"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "last-year-exam",
+      "title": "Last Year's Exam",
+      "description": "Previous Machine Learning exam questions.",
+      "sourcePath": "/Users/plevi/ML-Exam/last_year_exam_questions.md",
+      "questions": [
+        {
+          "id": "last-year-exam-q1",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "1",
+          "title": "Descriptive and Supervised Learning",
+          "type": "single",
+          "prompt": "Which one of the following tasks is descriptive and supervised learning?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Regression"
+            },
+            {
+              "id": "B",
+              "text": "Subgroup discovery"
+            },
+            {
+              "id": "C",
+              "text": "Classification"
+            },
+            {
+              "id": "D",
+              "text": "Descriptive clustering"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": []
+        },
+        {
+          "id": "last-year-exam-q2",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "2",
+          "title": "One-versus-rest Classification and Clustering",
+          "type": "multiple",
+          "prompt": "In a one-versus-rest classification, how many classifiers do you need to train for <math>k</math> classes? Select two answers, one for the unordered and one for the ordered version.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "<code>2k</code>"
+            },
+            {
+              "id": "B",
+              "text": "<math>k - 1</math>"
+            },
+            {
+              "id": "C",
+              "text": "<math>k</math>"
+            },
+            {
+              "id": "D",
+              "text": "<math>k(k - 1) / 2</math>"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "clustering"
+          ]
+        },
+        {
+          "id": "last-year-exam-q3",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "3",
+          "title": "Silhouette Coefficient",
+          "type": "multiple",
+          "prompt": "What does the silhouette coefficient allow to measure in clustering evaluation? One or more options might be correct.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The cohesion and separation of clusters"
+            },
+            {
+              "id": "B",
+              "text": "The quality of clustering per instance"
+            },
+            {
+              "id": "C",
+              "text": "The ratio of instances that should be together in one cluster but are not together, i.e. false negatives"
+            },
+            {
+              "id": "D",
+              "text": "The statistical significance of clusters"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "clustering"
+          ]
+        },
+        {
+          "id": "last-year-exam-q4",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "4",
+          "title": "Regularization and Overfitting",
+          "type": "single",
+          "prompt": "A random forest classifier is exhibiting signs of overfitting. The validation loss initially decreases but then begins to increase while training loss continues to decrease. Which combination of techniques would most effectively address this issue?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Use bootstrapping with sample sizes larger than the original dataset"
+            },
+            {
+              "id": "B",
+              "text": "Normalise numerical features through min-max normalisation."
+            },
+            {
+              "id": "C",
+              "text": "Remove all constraints on minimum number of samples per leaf node"
+            },
+            {
+              "id": "D",
+              "text": "Decrease <code>max_features</code> hyperparameter controlling the maximum number of features and limit the maximum depth of individual trees"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "ensembles",
+            "neural-networks",
+            "experiments"
+          ]
+        },
+        {
+          "id": "last-year-exam-q5",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "5",
+          "title": "Bias and Variance",
+          "type": "single",
+          "prompt": "What is the bias-variance trade-off in machine learning?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The trade-off between model complexity and model interpretability."
+            },
+            {
+              "id": "B",
+              "text": "The trade-off between training time and model performance."
+            },
+            {
+              "id": "C",
+              "text": "The trade-off between model accuracy and model precision."
+            },
+            {
+              "id": "D",
+              "text": "The trade-off between a model's ability to capture the underlying patterns in the data and its sensitivity to noise and small fluctuations."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "xai"
+          ]
+        },
+        {
+          "id": "last-year-exam-q6",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "6",
+          "title": "Friedman Test",
+          "type": "multiple",
+          "prompt": "Which of the following statements about using the Friedman test for evaluation of machine learning algorithms is/are correct?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The Friedman test is only applicable when comparing exactly two algorithms."
+            },
+            {
+              "id": "B",
+              "text": "A significant Friedman test result implies which specific algorithms are better than the others."
+            },
+            {
+              "id": "C",
+              "text": "The Friedman test is a statistical test used to compare the performance of multiple algorithms across multiple datasets through comparing the means of their performance distributions."
+            },
+            {
+              "id": "D",
+              "text": "The Friedman test evaluates whether there are significant differences in the ranks of the algorithms across datasets."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "experiments"
+          ]
+        },
+        {
+          "id": "last-year-exam-q7",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "7",
+          "title": "Ordinal Features",
+          "type": "multiple",
+          "prompt": "Which one of the following statistics are meaningful for ordinal features? Select all that apply. One or more options might be correct.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Median"
+            },
+            {
+              "id": "B",
+              "text": "Order"
+            },
+            {
+              "id": "C",
+              "text": "Kurtosis"
+            },
+            {
+              "id": "D",
+              "text": "Mean"
+            },
+            {
+              "id": "E",
+              "text": "Scale"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "features"
+          ]
+        },
+        {
+          "id": "last-year-exam-q8",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "8",
+          "title": "Bayesian Learning",
+          "type": "multiple",
+          "prompt": "Which of the following statements correctly describes key concepts from the Bayesian view of learning? Multiple answers are possible. One or more options might be correct.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "The likelihood represents our belief before seeing the data."
+            },
+            {
+              "id": "B",
+              "text": "The MAP decision rule maximizes the prior probability <math>P(Y)</math>."
+            },
+            {
+              "id": "C",
+              "text": "The ML decision rule is defined based on maximizing the probability <math>P(X | Y)</math>, by ignoring the prior."
+            },
+            {
+              "id": "D",
+              "text": "Learning is seen as reducing uncertainty by updating beliefs with new data."
+            },
+            {
+              "id": "E",
+              "text": "The posterior is inversely influenced by the prior."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "bayesian"
+          ]
+        },
+        {
+          "id": "last-year-exam-q9",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "9",
+          "title": "Tree Models",
+          "type": "single",
+          "prompt": "Given a trained decision tree classifier and a dataset, how can you identify whether a specific instance is misclassified by the tree?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Check the overall training accuracy of the tree"
+            },
+            {
+              "id": "B",
+              "text": "Pass this specific instance through the model and compare its predicted label with its true label."
+            },
+            {
+              "id": "C",
+              "text": "Check the Gini score at the leaf nodes"
+            },
+            {
+              "id": "D",
+              "text": "Find the nearest neighbor of each instance and compare true labels."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "decision-trees"
+          ]
+        },
+        {
+          "id": "last-year-exam-q10",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "10",
+          "title": "Bagging and Boosting",
+          "type": "single",
+          "prompt": "Which statement accurately describes the difference between bagging and boosting?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Bagging and boosting are both variance-reduction techniques used with high-variance models."
+            },
+            {
+              "id": "B",
+              "text": "Bagging is a bias-reduction technique used with high-bias models, while boosting is a variance-reduction technique used with high-variance models."
+            },
+            {
+              "id": "C",
+              "text": "Bagging is a variance-reduction technique used with high-variance models, while boosting is a bias-reduction technique used with high-bias models."
+            },
+            {
+              "id": "D",
+              "text": "Bagging and boosting are both bias-reduction techniques used with high-bias models."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "ensembles"
+          ]
+        },
+        {
+          "id": "last-year-exam-q11",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "11",
+          "title": "Gaussian Mixture",
+          "type": "single",
+          "prompt": "What is the best approach to estimating the parameters of a mixture of <math>K</math> normal distributions, each with their own mean and covariance matrix, given data without labels? Assume that <math>K</math> is given.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Randomly assign labels to the data and from there use Maximum a posteriori (MAP) estimation to find the best fitting values for the parameters. Perform this <math>n</math> times, say <math>n = 100</math>, and compute the mean values for the parameters from all these different runs."
+            },
+            {
+              "id": "B",
+              "text": "Pick <math>K</math> random parameters and compute the probability of each possible label for the given data. Then, using those probabilities, improve the estimate on those random parameters until they converge."
+            },
+            {
+              "id": "C",
+              "text": "Enumerate the <math>K</math> labels and randomly assign one label to each instance. Next train a regression model that predicts the mean and standard deviation of each class."
+            },
+            {
+              "id": "D",
+              "text": "Partition the data into <math>K</math> equal slices and estimate the mean and standard deviations on those partitions to find the parameters."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "bayesian"
+          ]
+        },
+        {
+          "id": "last-year-exam-q12",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "12",
+          "title": "NeuralNets",
+          "type": "single",
+          "prompt": "What do the inclusion of multiple hidden layers and activation functions enable in neural networks?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "To overcome overfitting issues during training."
+            },
+            {
+              "id": "B",
+              "text": "To create a convex loss function."
+            },
+            {
+              "id": "C",
+              "text": "To model nonlinear relationships."
+            },
+            {
+              "id": "D",
+              "text": "To create stronger models with smaller networks."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "neural-networks"
+          ]
+        },
+        {
+          "id": "last-year-exam-q13",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "13",
+          "title": "PCA",
+          "type": "single",
+          "prompt": "Which of the following statements is correct about the first principal component in Principal Component Analysis (PCA)?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "It is one of the original features with the highest variance before any transformation."
+            },
+            {
+              "id": "B",
+              "text": "It is the direction in the feature space that has the smallest variance and is orthogonal to all other components."
+            },
+            {
+              "id": "C",
+              "text": "It is the direction along which the data has the greatest variance."
+            },
+            {
+              "id": "D",
+              "text": "It is the direction that maximizes the separation between classes in supervised learning tasks."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "features"
+          ]
+        },
+        {
+          "id": "last-year-exam-q14",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "14",
+          "title": "LIME",
+          "type": "single",
+          "prompt": "What is the goal of LIME algorithm?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "To modify the model and make it \"intrinsically\" explainable."
+            },
+            {
+              "id": "B",
+              "text": "To create a surrogate model for a black-box model with improved accuracy and transparency."
+            },
+            {
+              "id": "C",
+              "text": "To create a mechanism to explain individual instances."
+            },
+            {
+              "id": "D",
+              "text": "To generate a global summary of a model's decision boundaries."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "xai"
+          ]
+        },
+        {
+          "id": "last-year-exam-q15",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "15",
+          "title": "K-Means Clustering",
+          "type": "multiple",
+          "prompt": "Which of the following is true about K-Means clustering? One or more options might be correct.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "It is less scalable than K-Medoids"
+            },
+            {
+              "id": "B",
+              "text": "It is more robust to outliers than K-Medoids."
+            },
+            {
+              "id": "C",
+              "text": "It minimizes the total within-cluster scatter."
+            },
+            {
+              "id": "D",
+              "text": "It always selects actual data points as cluster centers."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "clustering"
+          ]
+        },
+        {
+          "id": "last-year-exam-q16",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "16",
+          "title": "Bayesian Optimisation",
+          "type": "single",
+          "prompt": "Which statement is correct about Bayesian optimisation?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "It is an approach for hyperparameter optimisation that is not data efficient."
+            },
+            {
+              "id": "B",
+              "text": "It is easy to parallelise."
+            },
+            {
+              "id": "C",
+              "text": "It uses an acquisition function to find promising points to evaluate."
+            },
+            {
+              "id": "D",
+              "text": "It is an important algorithm included in the search space of most state-of-the-art AutoML systems."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "bayesian"
+          ]
+        },
+        {
+          "id": "last-year-exam-q17",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "17",
+          "title": "Kernel Trick",
+          "type": "single",
+          "prompt": "Complete the following sentence. The kernel trick...",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Can transform the data to a high-dimensional feature space by applying a function on each data instance."
+            },
+            {
+              "id": "B",
+              "text": "Is necessary if we want to add non-linear polynomial features to a learning algorithm."
+            },
+            {
+              "id": "C",
+              "text": "Allows for the presentation of the data in a high-dimensional feature space without explicitly defining the space."
+            },
+            {
+              "id": "D",
+              "text": "Is a regularization approach applicable to any learning problem."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "concepts": [
+            "linear-models"
+          ]
+        },
+        {
+          "id": "last-year-exam-q18a",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "18a",
+          "title": "Question 18a",
+          "type": "single",
+          "prompt": "Would you trust the code generated by Copilot for the <code>recall</code> function?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "True"
+            },
+            {
+              "id": "B",
+              "text": "False"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q18",
+          "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupOrder": 0,
+          "concepts": [
+            "metrics"
+          ]
+        },
+        {
+          "id": "last-year-exam-q18b",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "18b",
+          "title": "Question 18b",
+          "type": "open",
+          "prompt": "Write down some lines of code, 3-4 lines, showing what the function <code>precision</code> looks like. You can assume that <code>true_negatives</code> and <code>false_positives</code> are given to you.",
+          "points": 1,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q18",
+          "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupOrder": 1,
+          "concepts": [
+            "metrics"
+          ]
+        },
+        {
+          "id": "last-year-exam-q18c",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "18c",
+          "title": "Question 18c",
+          "type": "single",
+          "prompt": "Then, you decide to use Copilot again, but this time to generate a function that computes the F1 score.\n\n\n\n<code lang=\"python\">\ndef F1(true_labels, predicted_labels, positive_class):\n    p = true_positives(true_labels, predicted_labels, positive_class)\n    r = false_negatives(true_labels, predicted_labels, positive_class)\n    return 2 * ((p + r) / (p * r))\n</code>\n\n\n\nIs the above metric useful for assessing the F1 score of your classifier?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Yes"
+            },
+            {
+              "id": "B",
+              "text": "No"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q18",
+          "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupOrder": 2,
+          "concepts": [
+            "metrics"
+          ]
+        },
+        {
+          "id": "last-year-exam-q18d",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "18d",
+          "title": "Question 18d",
+          "type": "open",
+          "prompt": "Explain your answer here. Why is this correct or false?",
+          "points": 1,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q18",
+          "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupOrder": 3,
+          "concepts": [
+            "xai"
+          ]
+        },
+        {
+          "id": "last-year-exam-q19a",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "19a",
+          "title": "Question 19a",
+          "type": "multiple",
+          "prompt": "You pick a neural-network-based method to model your tasks. You made this choice because... Note that one or more options might be correct.",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Neural-network-based models have a high bias and low variance helping with generalization in combination with a large dataset."
+            },
+            {
+              "id": "B",
+              "text": "It will help you for explainability purposes."
+            },
+            {
+              "id": "C",
+              "text": "Feature extraction will be automatically performed by the model itself."
+            },
+            {
+              "id": "D",
+              "text": "From prior knowledge you know that combining a Gaussian kernel and a neural network leads to an expressive model."
+            },
+            {
+              "id": "E",
+              "text": "You know ways to hand-craft and engineer good features for your input instances."
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q19",
+          "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupOrder": 0,
+          "concepts": [
+            "neural-networks"
+          ]
+        },
+        {
+          "id": "last-year-exam-q19b",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "19b",
+          "title": "Question 19b",
+          "type": "single",
+          "prompt": "Sigmoid is a good option as an activation function for the output layer of...",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "Task B"
+            },
+            {
+              "id": "B",
+              "text": "None of the two tasks"
+            },
+            {
+              "id": "C",
+              "text": "Tasks A and B"
+            },
+            {
+              "id": "D",
+              "text": "Task A"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q19",
+          "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupOrder": 1,
+          "concepts": [
+            "neural-networks"
+          ]
+        },
+        {
+          "id": "last-year-exam-q19c",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "19c",
+          "title": "Question 19c",
+          "type": "multiple",
+          "prompt": "Which loss function should you pick for tasks A and B?",
+          "points": 1,
+          "options": [
+            {
+              "id": "A",
+              "text": "You should pick Cross-Entropy for task B"
+            },
+            {
+              "id": "B",
+              "text": "You should pick Mean Squared Error (MSE) for task B"
+            },
+            {
+              "id": "C",
+              "text": "You should pick Cross-Entropy for task A"
+            },
+            {
+              "id": "D",
+              "text": "You should pick Mean Squared Error (MSE) for task A"
+            }
+          ],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q19",
+          "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupOrder": 2,
+          "concepts": [
+            "neural-networks"
+          ]
+        },
+        {
+          "id": "last-year-exam-q19d",
+          "setId": "last-year-exam",
+          "source": "Last Year's Exam",
+          "number": "19d",
+          "title": "Question 19d",
+          "type": "open",
+          "prompt": "Your training dataset contains 10 million images, and fitting this big dataset in your hardware resources is impossible. Name one technique that could help you perform efficient training and use all your data.",
+          "points": 1,
+          "options": [],
+          "answer": {
+            "correctOptionIds": null,
+            "expectedText": null,
+            "source": "missing"
+          },
+          "imagePaths": [],
+          "groupId": "last-year-exam-q19",
+          "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupOrder": 3,
+          "concepts": []
+        }
+      ]
+    }
+  ]
+}

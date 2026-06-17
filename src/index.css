@@ -1,0 +1,82 @@
+:root {
+  --bg: #101214;
+  --surface: #181b1f;
+  --surface-raised: #1d2228;
+  --text: #c8cdd4;
+  --text-h: #f4f7fb;
+  --text-prose: #e1e6ed;
+  --text-soft: #b8c0ca;
+  --muted: #9aa4b2;
+  --border: #2b3036;
+  --code-bg: #22272e;
+  --accent: #5aa9ff;
+  --accent-bg: rgba(90, 169, 255, 0.14);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+
+  font-family: var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100svh;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+button,
+input,
+textarea {
+  font-family: inherit;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  color: var(--text-h);
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: 34px;
+  line-height: 1.12;
+}
+
+h2 {
+  font-size: 26px;
+  line-height: 1.18;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100svh;
+}
+
+code {
+  font-family: var(--mono);
+}

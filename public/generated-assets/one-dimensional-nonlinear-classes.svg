@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="300" viewBox="0 0 920 300" role="img">
+  <defs>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#111827"/>
+    </marker>
+  </defs>
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  
+  <line x1="110" y1="165" x2="810" y2="165" stroke="#2563eb" stroke-width="6" marker-end="url(#arrow)"/>
+  <circle cx="140" cy="130" r="13" fill="#2563eb"/>
+  <circle cx="190" cy="130" r="13" fill="#2563eb"/>
+  <circle cx="240" cy="130" r="13" fill="#2563eb"/>
+  <circle cx="580" cy="130" r="13" fill="#2563eb"/>
+  <circle cx="640" cy="130" r="13" fill="#2563eb"/>
+  <circle cx="700" cy="130" r="13" fill="#2563eb"/>
+  <circle cx="760" cy="130" r="13" fill="#2563eb"/>
+  <line x1="269" y1="130" x2="321" y2="130" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="295" y1="104" x2="295" y2="156" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="329" y1="130" x2="381" y2="130" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="355" y1="104" x2="355" y2="156" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="389" y1="130" x2="441" y2="130" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="415" y1="104" x2="415" y2="156" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="449" y1="130" x2="501" y2="130" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <line x1="475" y1="104" x2="475" y2="156" stroke="#2563eb" stroke-width="10" stroke-linecap="square"/>
+  <text x="110" y="225" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="700" fill="#374151">single numerical feature</text>
+  <text x="306" y="75" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900" fill="#2563eb">+</text>
+  <text x="128" y="75" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900" fill="#2563eb">-</text>
+  <text x="615" y="75" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900" fill="#2563eb">-</text>
+</svg>

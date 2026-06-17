@@ -1,0 +1,41 @@
+{
+  "generatedAt": "2026-06-17T09:34:46.555Z",
+  "description": "Generated TurboLearner question assets. Reference these from question prompts with <image>/generated-assets/file.svg</image>.",
+  "assets": [
+    {
+      "id": "bias-variance-wiggly-boundary",
+      "title": "High variance / low bias decision boundary",
+      "kind": "decision-boundary",
+      "path": "/generated-assets/bias-variance-wiggly-boundary.svg",
+      "promptSnippet": "<image>/generated-assets/bias-variance-wiggly-boundary.svg</image>"
+    },
+    {
+      "id": "one-dimensional-nonlinear-classes",
+      "title": "One-dimensional non-linear class layout",
+      "kind": "one-dimensional-classification",
+      "path": "/generated-assets/one-dimensional-nonlinear-classes.svg",
+      "promptSnippet": "<image>/generated-assets/one-dimensional-nonlinear-classes.svg</image>"
+    },
+    {
+      "id": "roc-curve-comparison",
+      "title": "ROC curve comparison",
+      "kind": "roc",
+      "path": "/generated-assets/roc-curve-comparison.svg",
+      "promptSnippet": "<image>/generated-assets/roc-curve-comparison.svg</image>"
+    },
+    {
+      "id": "confusion-matrix-binary",
+      "title": "Binary confusion matrix",
+      "kind": "confusion-matrix",
+      "path": "/generated-assets/confusion-matrix-binary.svg",
+      "promptSnippet": "<image>/generated-assets/confusion-matrix-binary.svg</image>"
+    },
+    {
+      "id": "decision-tree-weather",
+      "title": "Small decision tree",
+      "kind": "decision-tree",
+      "path": "/generated-assets/decision-tree-weather.svg",
+      "promptSnippet": "<image>/generated-assets/decision-tree-weather.svg</image>"
+    }
+  ]
+}

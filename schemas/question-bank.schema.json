@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://turbolearner.local/schemas/question-bank.schema.json",
+  "title": "TurboLearner Question Bank",
+  "description": "Canonical schema for TurboLearner exam question banks. Prompt and option text may contain TurboLearner content tags: <math>, <image>, and <code>.",
+  "version": 2,
+  "type": "object",
+  "required": ["schema", "generatedAt", "sets"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "object",
+      "required": ["version", "schemaRef", "description", "contentTags"],
+      "additionalProperties": true,
+      "properties": {
+        "version": { "const": 2 },
+        "schemaRef": { "const": "schemas/question-bank.schema.json" },
+        "description": { "type": "string" },
+        "contentTags": {
+          "type": "object",
+          "required": ["math", "image", "code"],
+          "additionalProperties": false,
+          "properties": {
+            "math": { "type": "string" },
+            "image": { "type": "string" },
+            "code": { "type": "string" }
+          }
+        }
+      }
+    },
+    "generatedAt": {
+      "type": "string",
+      "description": "ISO-8601 timestamp for generated/imported banks."
+    },
+    "sets": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/questionSet" }
+    }
+  },
+  "$defs": {
+    "questionSet": {
+      "type": "object",
+      "required": ["id", "title", "description", "questions"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "sourcePath": { "type": "string" },
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/question" }
+        }
+      }
+    },
+    "question": {
+      "type": "object",
+      "required": [
+        "id",
+        "setId",
+        "source",
+        "number",
+        "title",
+        "type",
+        "prompt",
+        "options",
+        "answer"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "setId": { "$ref": "#/$defs/stableId" },
+        "source": { "type": "string", "minLength": 1 },
+        "number": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["single", "multiple", "open"] },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Markdown-compatible prompt. Use <math>...</math>, <math display>...</math>, <image>...</image>, and <code lang=\"python\">...</code> for structured content."
+        },
+        "points": { "type": "number" },
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/option" }
+        },
+        "answer": { "$ref": "#/$defs/answer" },
+        "correctOptionIds": {
+          "type": "array",
+          "description": "Legacy compatibility mirror. Prefer answer.correctOptionIds.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expectedAnswer": {
+          "type": "string",
+          "description": "Legacy compatibility mirror. Prefer answer.expectedText."
+        },
+        "imagePaths": {
+          "type": "array",
+          "description": "Optional extracted image paths. Prefer <image> tags inside prompt for rendering.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "groupId": { "$ref": "#/$defs/stableId" },
+        "groupTitle": { "type": "string" },
+        "groupPrompt": { "type": "string" },
+        "groupOrder": { "type": "integer", "minimum": 0 },
+        "concepts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stableId" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "open" } } },
+          "then": {
+            "properties": {
+              "options": { "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "single" } } },
+          "then": {
+            "properties": {
+              "options": { "minItems": 2 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "multiple" } } },
+          "then": {
+            "properties": {
+              "options": { "minItems": 2 }
+            }
+          }
+        }
+      ]
+    },
+    "option": {
+      "type": "object",
+      "required": ["id", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Markdown-compatible option text. May contain <math> and inline <code> tags."
+        }
+      }
+    },
+    "answer": {
+      "type": "object",
+      "required": ["correctOptionIds", "expectedText", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "correctOptionIds": {
+          "description": "Option ids for single/multiple questions when an answer key exists, otherwise null.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          ]
+        },
+        "expectedText": {
+          "description": "Expected answer/rubric for open questions when known, otherwise null.",
+          "type": ["string", "null"]
+        },
+        "source": {
+          "enum": ["provided", "inferred", "missing"],
+          "description": "provided = official/source answer key; inferred = generated or tutor-created answer; missing = no stored answer."
+        }
+      }
+    },
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    }
+  }
+}
