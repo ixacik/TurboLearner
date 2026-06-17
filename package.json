@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently \"npm:dev:web\" \"npm:dev:server\"",
     "dev:web": "vite",
-    "dev:server": "nodemon server/index.mjs",
+    "dev:server": "nodemon --watch server --ext mjs,json server/index.mjs",
     "generate:assets": "node scripts/generateQuestionAssets.mjs",
     "import:questions": "node scripts/importQuestions.mjs",
     "audit:questions": "node scripts/auditQuestionBank.mjs",

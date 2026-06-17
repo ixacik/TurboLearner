@@ -258,6 +258,43 @@
   line-height: 1.5;
 }
 
+.markdown-chat h1,
+.markdown-chat h2,
+.markdown-chat h3,
+.markdown-chat h4,
+.markdown-chat h5,
+.markdown-chat h6 {
+  margin: 1em 0 0.45em;
+  color: var(--text-h);
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.28;
+}
+
+.markdown-chat h1,
+.markdown-chat h2 {
+  font-size: 1.12em;
+}
+
+.markdown-chat h3 {
+  font-size: 1.04em;
+}
+
+.markdown-chat h4,
+.markdown-chat h5,
+.markdown-chat h6 {
+  font-size: 1em;
+}
+
+.markdown-chat h1:first-child,
+.markdown-chat h2:first-child,
+.markdown-chat h3:first-child,
+.markdown-chat h4:first-child,
+.markdown-chat h5:first-child,
+.markdown-chat h6:first-child {
+  margin-top: 0;
+}
+
 .markdown-chat ol {
   counter-reset: markdown-ordered-list;
   list-style: none;
@@ -574,10 +611,8 @@
   font-size: 16.5px;
   line-height: 1.55;
   box-sizing: border-box;
-}
-
-.answer-textarea.answer-key-visible {
-  overflow-y: hidden;
+  overflow: hidden;
+  scrollbar-width: none;
 }
 
 .answer-textarea.correct-answer {
@@ -698,12 +733,11 @@
   display: block;
   width: 100%;
   min-height: 46px;
-  max-height: 132px;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px 14px;
   resize: none;
-  overflow-y: auto;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text-prose);
   font: inherit;
@@ -712,6 +746,7 @@
   scrollbar-width: none;
 }
 
+.answer-textarea::-webkit-scrollbar,
 .chat-row textarea::-webkit-scrollbar,
 .codex-log::-webkit-scrollbar {
   display: none;

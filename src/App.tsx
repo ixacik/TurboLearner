@@ -15,6 +15,7 @@ type QuestionType = 'single' | 'multiple' | 'open'
 type Option = {
   id: string
   text: string
+  visibleLabel?: string
 }
 
 type Question = {
@@ -149,6 +150,7 @@ function identity<T>(value: T) {
 const progressKey = 'turbolearner.progress.v1'
 const activeSetKey = 'turbolearner.activeSet.v1'
 const activeQuestionKey = 'turbolearner.activeQuestion.v1'
+const activeQuestionQueueKey = 'turbolearner.activeQuestionQueue.v1'
 const activeAnswersKey = 'turbolearner.activeAnswers.v1'
 const activeResultKey = 'turbolearner.activeResult.v1'
 const activeAnswerKeyRevealedKey = 'turbolearner.activeAnswerKeyRevealed.v1'
@@ -156,6 +158,8 @@ const activeRevealedCorrectOptionIdsKey = 'turbolearner.revealedCorrectOptionIds
 const activeHistoryKey = 'turbolearner.activeHistory.v1'
 const activeMessagesKey = 'turbolearner.activeMessages.v1'
 const activeTutorSessionKey = 'turbolearner.activeTutorSession.v1'
+const activeOptionOrderSeedKey = 'turbolearner.activeOptionOrderSeed.v1'
+const activeUsedLearningBeforeAnswerKey = 'turbolearner.usedLearningBeforeAnswer.v1'
 const codexSidebarWidthKey = 'turbolearner.codexSidebarWidth.v1'
 const defaultCodexSidebarWidth = 480
 const minCodexSidebarWidth = 360
@@ -179,6 +183,10 @@ function App() {
   const [progress, setProgress] = useLocalState<Record<string, ProgressRecord>>(progressKey, {})
   const [history, setHistory] = useLocalState<HistoryItem[]>(activeHistoryKey, [])
   const [currentId, setCurrentId] = useLocalState<string | null>(activeQuestionKey, null)
+  const [questionQueue, setQuestionQueue] = useLocalState<string[]>(
+    activeQuestionQueueKey,
+    [],
+  )
   const [answersByQuestion, setAnswersByQuestion] = useLocalState<Record<string, AnswerPayload>>(
     activeAnswersKey,
     {},
@@ -209,8 +217,15 @@ function App() {
     activeTutorSessionKey,
     crypto.randomUUID(),
   )
+  const [optionOrderSeed, setOptionOrderSeed] = useLocalState(
+    activeOptionOrderSeedKey,
+    crypto.randomUUID(),
+  )
+  const [usedLearningBeforeAnswer, setUsedLearningBeforeAnswer] = useLocalState(
+    activeUsedLearningBeforeAnswerKey,
+    false,
+  )
   const [error, setError] = useState<string | null>(null)
-  const recentIds = useRef<string[]>([])
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null)
   const codexLogRef = useRef<HTMLDivElement>(null)
   const shouldFollowCodexStreamRef = useRef(true)
@@ -234,6 +249,7 @@ function App() {
 
         setSelectedSetId(override.setId)
         setCurrentId(override.unitId)
+        setQuestionQueue([])
         setAnswersByQuestion({})
         setResult(null)
         setMessages([])
@@ -249,6 +265,7 @@ function App() {
     setAnswersByQuestion,
     setCurrentId,
     setMessages,
+    setQuestionQueue,
     setResult,
     setSelectedSetId,
     setTutorSessionId,
@@ -272,8 +289,8 @@ function App() {
   const activeSet = allSets.find((set) => set.id === selectedSetId) ?? null
   const questions = useMemo(() => {
     if (!activeSet) return []
-    return activeSet.questions
-  }, [activeSet])
+    return activeSet.questions.map((question) => shuffleQuestionOptions(question, optionOrderSeed))
+  }, [activeSet, optionOrderSeed])
   const units = useMemo(() => buildQuestionUnits(questions), [questions])
   const currentUnit = units.find((unit) => unit.id === currentId) ?? null
 
@@ -321,12 +338,11 @@ function App() {
     shouldFollowCodexStreamRef.current = isScrolledNearBottom(log)
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const textarea = chatTextareaRef.current
     if (!textarea) return
 
-    textarea.style.height = '0px'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 132)}px`
+    autoGrowTextarea(textarea)
   }, [chatInput, result])
 
   useLayoutEffect(() => {
@@ -383,6 +399,8 @@ function App() {
     setCodexStatus('')
     setStreamingTutorMessage('')
     setTutorSessionId(crypto.randomUUID())
+    setOptionOrderSeed(crypto.randomUUID())
+    setUsedLearningBeforeAnswer(false)
     setError(null)
   }, [
     followCodexStream,
@@ -390,28 +408,49 @@ function App() {
     setIsAnswerKeyRevealed,
     setRevealedCorrectOptionIdsByQuestion,
     setMessages,
+    setOptionOrderSeed,
     setResult,
     setTutorSessionId,
+    setUsedLearningBeforeAnswer,
   ])
 
-  const showNextQuestion = useCallback((pool = units, records = progress) => {
-    if (pool.length === 0) return
-    const next = chooseNextUnit(pool, records, recentIds.current)
-    recentIds.current = [next.id, ...recentIds.current.filter((id) => id !== next.id)].slice(0, 2)
-    setCurrentId(next.id)
+  const showNextQuestion = useCallback((requeueCurrent = false) => {
+    const next = getNextQuestionFromQueue(
+      units.map((unit) => unit.id),
+      currentUnit?.id ?? currentId,
+      questionQueue,
+      requeueCurrent,
+    )
+    if (!next) return
+
+    setCurrentId(next.currentId)
+    setQuestionQueue(next.queue)
     resetQuestionState()
-  }, [progress, resetQuestionState, setCurrentId, units])
+  }, [
+    currentId,
+    currentUnit,
+    questionQueue,
+    resetQuestionState,
+    setCurrentId,
+    setQuestionQueue,
+    units,
+  ])
 
   function startSet(setId: string) {
     setSelectedSetId(setId)
     const nextSet = allSets.find((set) => set.id === setId)
     resetQuestionState()
-    if (nextSet) showNextQuestion(buildQuestionUnits(nextSet.questions), progress)
+    if (!nextSet) return
+
+    const initialDeck = buildInitialQuestionDeck(buildQuestionUnits(nextSet.questions))
+    setCurrentId(initialDeck.currentId)
+    setQuestionQueue(initialDeck.queue)
   }
 
   function returnToMenu() {
     setSelectedSetId(null)
     setCurrentId(null)
+    setQuestionQueue([])
     resetQuestionState()
   }
 
@@ -469,7 +508,6 @@ function App() {
 
   const submitAnswer = useCallback(async () => {
     if (!currentUnit || isGrading) return
-    const answer = buildAnswerPayload(currentUnit, answersByQuestion)
     if (!isUnitAnswered(currentUnit, answersByQuestion)) return
 
     setIsGrading(true)
@@ -481,13 +519,14 @@ function App() {
     const previousMessages = persistedTutorMessages(messages)
     setMessages([...previousMessages, { role: 'tutor', content: '', kind: 'grading-pending' }])
     try {
+      const tutorQuestion = buildTutorQuestion(currentUnit)
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
           sessionId: tutorSessionId,
           mode: 'submit',
-          question: buildTutorQuestion(currentUnit),
-          answer,
+          question: tutorQuestion,
+          answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
           messages,
         },
         {
@@ -508,13 +547,16 @@ function App() {
       if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
         setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
       }
-      setResult(tutorResponse)
+      const recordedResponse = usedLearningBeforeAnswer
+        ? forceLearningAttemptRetry(tutorResponse)
+        : tutorResponse
+      setResult(recordedResponse)
       setIsAnswerKeyRevealed(true)
       setMessages([
         ...previousMessages,
-        { role: 'tutor', content: tutorResponse.explanation, kind: 'grading' },
+        { role: 'tutor', content: recordedResponse.explanation, kind: 'grading' },
       ])
-      recordAnswer(currentUnit, tutorResponse)
+      recordAnswer(currentUnit, recordedResponse)
     } catch (submitError) {
       setMessages(previousMessages)
       setError(String(submitError))
@@ -537,6 +579,7 @@ function App() {
     setResult,
     tutorSessionId,
     revealedCorrectOptionIdsByQuestion,
+    usedLearningBeforeAnswer,
   ])
 
   useEffect(() => {
@@ -577,26 +620,20 @@ function App() {
     setRevealedCorrectOptionIdsByQuestion,
   ])
 
-  const explainFromZero = useCallback(async () => {
+  const explainConceptBeforeAnswering = useCallback(async () => {
     if (!currentUnit || isGrading) return
 
-    const learningResult: TutorResponse = {
-      isCorrect: false,
-      score: 0,
-      verdict: 'Learning mode',
-      explanation: '',
-      concepts: currentUnit.concepts,
-      nextPrompt: 'Try explaining the concept back in your own words.',
-    }
-
-    setResult(learningResult)
-    recordAnswer(currentUnit, learningResult)
     setIsGrading(true)
-    setIsAnswerKeyRevealed(true)
     followCodexStream()
-    setCodexStatus('Building explanation...')
+    setCodexStatus('Teaching the concept...')
     setStreamingTutorMessage('')
     setError(null)
+    const learningPrompt = [
+      'I do not know this yet.',
+      'Teach me the underlying concept from zero like a textbook, but do not answer this question for me.',
+      'Do not reveal the correct option, eliminate options, give the final formula for this exact question, or make the answer immediately inferable.',
+      'Leave me with desirable difficulty so I still have to reason and submit an answer myself.',
+    ].join(' ')
     const previousMessages = persistedTutorMessages(messages)
     setMessages([
       ...previousMessages,
@@ -607,10 +644,12 @@ function App() {
         '/api/explain',
         {
           sessionId: tutorSessionId,
-          mode: 'learn',
+          mode: 'chat',
+          phase: 'pre_submit',
+          request: learningPrompt,
           question: buildTutorQuestion(currentUnit),
-          answer: buildAnswerPayload(currentUnit, answersByQuestion),
-          messages,
+          answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
+          messages: previousMessages,
         },
         {
           onStatus: setCodexStatus,
@@ -619,17 +658,7 @@ function App() {
           },
         },
       )
-      const responseCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(
-        currentUnit,
-        tutorResponse,
-      )
-      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
-        revealedCorrectOptionIdsByQuestion,
-        responseCorrectOptionIdsByQuestion,
-      )
-      if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
-        setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
-      }
+      setUsedLearningBeforeAnswer(true)
       setMessages([
         ...previousMessages,
         { role: 'tutor', content: tutorResponse.explanation, kind: 'learning' },
@@ -648,13 +677,9 @@ function App() {
     followCodexStream,
     isGrading,
     messages,
-    recordAnswer,
-    setIsAnswerKeyRevealed,
     setMessages,
-    setRevealedCorrectOptionIdsByQuestion,
-    setResult,
+    setUsedLearningBeforeAnswer,
     tutorSessionId,
-    revealedCorrectOptionIdsByQuestion,
   ])
 
   useEffect(() => {
@@ -676,7 +701,7 @@ function App() {
 
       if (result) {
         event.preventDefault()
-        showNextQuestion()
+        showNextQuestion(!result.isCorrect)
         return
       }
 
@@ -714,7 +739,7 @@ function App() {
           mode: 'chat',
           phase: result ? 'post_submit' : 'pre_submit',
           question: buildTutorQuestion(currentUnit),
-          answer: buildAnswerPayload(currentUnit, answersByQuestion),
+          answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
           messages: nextMessages,
         },
         {
@@ -827,7 +852,7 @@ function App() {
               <button
                 className="primary-button"
                 type="button"
-                onClick={() => showNextQuestion()}
+                onClick={() => showNextQuestion(!result.isCorrect)}
                 disabled={isGrading}
                 aria-keyshortcuts="Meta+Enter"
                 title="Command+Enter"
@@ -850,7 +875,7 @@ function App() {
                   <button
                     className="secondary-button"
                     type="button"
-                    onClick={explainFromZero}
+                    onClick={explainConceptBeforeAnswering}
                     disabled={isGrading}
                   >
                     I don&apos;t know
@@ -1031,13 +1056,12 @@ function QuestionPrompt({
     const textarea = openAnswerTextareaRef.current
     if (!textarea) return
 
-    if (question.type !== 'open' || !showAnswerKey) {
+    if (question.type !== 'open') {
       textarea.style.height = ''
       return
     }
 
-    textarea.style.height = 'auto'
-    textarea.style.height = `${textarea.scrollHeight}px`
+    autoGrowTextarea(textarea)
   }, [answer.text, question.type, showAnswerKey])
 
   return (
@@ -1343,6 +1367,11 @@ function MermaidDiagram({ chart }: { chart: string }) {
   return <div ref={ref} className="mermaid-box" />
 }
 
+function autoGrowTextarea(textarea: HTMLTextAreaElement) {
+  textarea.style.height = '0px'
+  textarea.style.height = `${textarea.scrollHeight}px`
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -1393,8 +1422,52 @@ function buildQuestionUnits(questions: Question[]) {
   }))
 }
 
+function shuffleQuestionOptions(question: Question, seed: string): Question {
+  if (question.options.length < 2) return question
+
+  return {
+    ...question,
+    options: seededShuffle(question.options, `${seed}:${question.id}`),
+  }
+}
+
+function seededShuffle<T>(values: T[], seed: string) {
+  const shuffled = [...values]
+  const random = mulberry32(hashString(seed))
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1))
+    const current = shuffled[index]
+    shuffled[index] = shuffled[swapIndex]
+    shuffled[swapIndex] = current
+  }
+
+  return shuffled
+}
+
+function hashString(value: string) {
+  let hash = 2166136261
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+
+  return hash >>> 0
+}
+
+function mulberry32(seed: number) {
+  return () => {
+    seed += 0x6D2B79F5
+    let value = seed
+    value = Math.imul(value ^ (value >>> 15), value | 1)
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296
+  }
+}
+
 function buildTutorQuestion(unit: QuestionUnit) {
-  if (unit.questions.length === 1) return unit.questions[0]
+  if (unit.questions.length === 1) return buildTutorChoiceQuestion(unit.questions[0])
 
   return {
     id: unit.id,
@@ -1403,28 +1476,45 @@ function buildTutorQuestion(unit: QuestionUnit) {
     type: 'group',
     prompt: unit.sharedPrompt ?? '',
     concepts: unit.concepts,
-    questions: unit.questions.map((question) => ({
-      id: question.id,
-      number: question.number,
-      title: question.title,
-      type: question.type,
-      prompt: question.prompt,
-      points: question.points,
-      options: question.options,
-      answer: question.answer,
-      correctOptionIds: question.correctOptionIds,
-      expectedAnswer: question.expectedAnswer,
-      concepts: question.concepts,
-    })),
+    questions: unit.questions.map(buildTutorChoiceQuestion),
   }
 }
 
-function buildAnswerPayload(
+function buildTutorChoiceQuestion(question: Question): Question {
+  if (question.type === 'open' || question.options.length === 0) return question
+
+  const sourceToTutorOptionId = buildTutorOptionIdMap(question)
+  const mapSourceOptionIdsToTutorIds = (optionIds: string[]) => {
+    return optionIds.map((optionId) => sourceToTutorOptionId.get(optionId) ?? optionId)
+  }
+
+  return {
+    ...question,
+    options: question.options.map((option, index) => ({
+      ...option,
+      id: buildTutorOptionId(question.id, option),
+      visibleLabel: displayOptionId(index),
+    })),
+    answer: question.answer
+      ? {
+          ...question.answer,
+          correctOptionIds: question.answer.correctOptionIds
+            ? mapSourceOptionIdsToTutorIds(question.answer.correctOptionIds)
+            : null,
+        }
+      : question.answer,
+    correctOptionIds: question.correctOptionIds
+      ? mapSourceOptionIdsToTutorIds(question.correctOptionIds)
+      : undefined,
+  }
+}
+
+function buildTutorAnswerPayload(
   unit: QuestionUnit,
   answersByQuestion: Record<string, AnswerPayload>,
 ): AnswerPayload | GroupAnswerPayload {
   if (unit.questions.length === 1) {
-    return normalizeAnswer(unit.questions[0], answersByQuestion[unit.questions[0].id])
+    return normalizeTutorAnswer(unit.questions[0], answersByQuestion[unit.questions[0].id])
   }
 
   return {
@@ -1432,9 +1522,42 @@ function buildAnswerPayload(
       questionId: question.id,
       number: question.number,
       type: question.type,
-      ...normalizeAnswer(question, answersByQuestion[question.id]),
+      ...normalizeTutorAnswer(question, answersByQuestion[question.id]),
     })),
   }
+}
+
+function normalizeTutorAnswer(question: Question, answer: AnswerPayload = {}) {
+  if (question.type === 'open') return { text: (answer.text ?? '').trim() }
+  const sourceToTutorOptionId = buildTutorOptionIdMap(question)
+  return {
+    selectedOptionIds: (answer.selectedOptionIds ?? [])
+      .map((optionId) => sourceToTutorOptionId.get(optionId) ?? optionId),
+  }
+}
+
+function buildTutorOptionIdMap(question: Question) {
+  return new Map(question.options.map((option) => [
+    option.id,
+    buildTutorOptionId(question.id, option),
+  ]))
+}
+
+function buildTutorOptionId(questionId: string, option: Option) {
+  return `opt_${hashString(`${questionId}\u0000${option.id}\u0000${option.text}`).toString(36)}`
+}
+
+function displayOptionId(index: number) {
+  const alphabetLength = 26
+  let value = index
+  let label = ''
+
+  do {
+    label = String.fromCharCode(65 + (value % alphabetLength)) + label
+    value = Math.floor(value / alphabetLength) - 1
+  } while (value >= 0)
+
+  return label
 }
 
 function normalizeAnswer(question: Question, answer: AnswerPayload = {}) {
@@ -1444,27 +1567,57 @@ function normalizeAnswer(question: Question, answer: AnswerPayload = {}) {
 
 function getResponseCorrectOptionIdsByQuestion(unit: QuestionUnit, response: TutorResponse) {
   if (response.correctOptionIdsByQuestion && Object.keys(response.correctOptionIdsByQuestion).length > 0) {
-    return response.correctOptionIdsByQuestion
+    return Object.fromEntries(
+      unit.questions.map((question) => {
+        const tutorQuestion = buildTutorChoiceQuestion(question)
+        const correctOptionIds = response.correctOptionIdsByQuestion?.[question.id] ?? []
+        return [
+          question.id,
+          correctOptionIds
+            .map((optionId) => resolveTutorResponseOptionId(optionId, tutorQuestion, question))
+            .filter((optionId): optionId is string => Boolean(optionId)),
+        ]
+      }).filter(([, correctOptionIds]) => correctOptionIds.length > 0),
+    )
   }
 
   const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
   if (choiceQuestions.length !== 1) return {}
 
-  const correctOptionIds = response.correctOptionIds?.length
-    ? response.correctOptionIds
-    : inferCorrectOptionIdsFromText(choiceQuestions[0], response.explanation)
+  const choiceQuestion = choiceQuestions[0]
+  const tutorChoiceQuestion = buildTutorChoiceQuestion(choiceQuestion)
+  const keyedCorrectOptionIds = response.correctOptionIds
+    ?.map((optionId) => resolveTutorResponseOptionId(optionId, tutorChoiceQuestion, choiceQuestion))
+    .filter((optionId): optionId is string => Boolean(optionId))
+  const inferredCorrectOptionIds = keyedCorrectOptionIds?.length
+    ? undefined
+    : inferCorrectOptionIdsFromText(tutorChoiceQuestion, choiceQuestion, response.explanation)
+  const correctOptionIds = keyedCorrectOptionIds?.length
+    ? keyedCorrectOptionIds
+    : inferredCorrectOptionIds
 
-  return correctOptionIds?.length ? { [choiceQuestions[0].id]: correctOptionIds } : {}
+  return correctOptionIds?.length
+    ? { [choiceQuestion.id]: correctOptionIds }
+    : {}
 }
 
-function inferCorrectOptionIdsFromText(question: Question, text: string) {
+function inferCorrectOptionIdsFromText(tutorQuestion: Question, sourceQuestion: Question, text: string) {
   if (!text.trim()) return undefined
-  const optionIds = question.options.map((option) => option.id)
+  const optionIds = tutorQuestion.options.map((option) => option.id)
   if (optionIds.length === 0) return undefined
 
-  const escapedIds = optionIds.map(escapeRegExp).join('|')
+  const visibleLabelToOptionId = new Map(
+    tutorQuestion.options
+      .filter((option) => option.visibleLabel)
+      .map((option) => [option.visibleLabel as string, option.id]),
+  )
+  const answerIds = visibleLabelToOptionId.size > 0
+    ? [...visibleLabelToOptionId.keys()]
+    : optionIds
+  const escapedIds = answerIds.map(escapeRegExp).join('|')
   const answerPatterns = [
     new RegExp(`\\bcorrect (?:choices?|answers?|options?)\\s+(?:are|is)\\s+((?:${escapedIds})(?:\\s*(?:,|and|&)\\s*(?:${escapedIds}))*)`, 'i'),
+    new RegExp(`\\b(?:correct|right|intended|inferred)?\\s*answer(?:\\s+from\\s+the\\s+concept)?\\s*(?:is|:)\\s*((?:${escapedIds})(?:\\s*(?:,|and|&)\\s*(?:${escapedIds}))*)`, 'i'),
     new RegExp(`\\bchoose\\s+((?:${escapedIds})(?:\\s*(?:,|and|&)\\s*(?:${escapedIds}))*)`, 'i'),
   ]
 
@@ -1472,12 +1625,39 @@ function inferCorrectOptionIdsFromText(question: Question, text: string) {
     const match = text.match(pattern)
     if (!match) continue
     const ids = match[1].match(new RegExp(`\\b(?:${escapedIds})\\b`, 'gi')) ?? []
-    const normalizedIds = ids.map((id) => optionIds.find((optionId) => optionId.toLowerCase() === id.toLowerCase()))
+    const normalizedIds = ids
+      .map((id) => resolveTutorResponseOptionId(id, tutorQuestion, sourceQuestion))
       .filter((id): id is string => Boolean(id))
     if (normalizedIds.length > 0) return uniqueStrings(normalizedIds)
   }
 
+  const rightOptionPattern = new RegExp(
+    `(?:^|\\n)\\s*(?:[-*]\\s*)?(?:\\*\\*)?(${escapedIds})(?:\\*\\*)?\\s*[:.)-]\\s*(?:\\*\\*)?(?:right|correct|true|best answer)\\b`,
+    'gi',
+  )
+  const rightOptionIds = [...text.matchAll(rightOptionPattern)]
+    .map((match) => resolveTutorResponseOptionId(match[1], tutorQuestion, sourceQuestion))
+    .filter((id): id is string => Boolean(id))
+  if (rightOptionIds.length > 0) return uniqueStrings(rightOptionIds)
+
   return undefined
+}
+
+function resolveTutorResponseOptionId(
+  idOrVisibleLabel: string,
+  tutorQuestion: Question,
+  sourceQuestion: Question,
+) {
+  const normalized = idOrVisibleLabel.toLowerCase()
+  const tutorOptionIndex = tutorQuestion.options.findIndex((option) => option.id.toLowerCase() === normalized)
+  if (tutorOptionIndex >= 0) return sourceQuestion.options[tutorOptionIndex]?.id
+
+  const visibleLabelIndex = tutorQuestion.options.findIndex((option) =>
+    option.visibleLabel?.toLowerCase() === normalized
+  )
+  if (visibleLabelIndex >= 0) return sourceQuestion.options[visibleLabelIndex]?.id
+
+  return sourceQuestion.options.find((option) => option.id.toLowerCase() === normalized)?.id
 }
 
 function buildRevealedCorrectOptionIds(
@@ -1510,25 +1690,40 @@ function isUnitAnswered(unit: QuestionUnit, answersByQuestion: Record<string, An
   })
 }
 
-function chooseNextUnit(
-  units: QuestionUnit[],
-  progress: Record<string, ProgressRecord>,
-  recentIds: string[],
+function buildInitialQuestionDeck(units: QuestionUnit[]) {
+  return buildInitialQuestionDeckFromIds(units.map((unit) => unit.id))
+}
+
+function buildInitialQuestionDeckFromIds(unitIds: string[]) {
+  const [currentId = null, ...queue] = shuffleQuestionIds(unitIds)
+  return { currentId, queue }
+}
+
+function getNextQuestionFromQueue(
+  unitIds: string[],
+  currentId: string | null,
+  queue: string[],
+  requeueCurrent: boolean,
 ) {
-  const now = Date.now()
-  const due = units.filter((unit) =>
-    unit.questions.some((question) => (progress[question.id]?.dueAt ?? 0) <= now),
-  )
-  const candidates = (due.length > 0 ? due : units).filter((unit) => !recentIds.includes(unit.id))
-  const pool = candidates.length > 0 ? candidates : due.length > 0 ? due : units
-  const weighted = pool.flatMap((unit) => {
-    const weight = unit.questions.reduce((total, question) => {
-      const record = progress[question.id]
-      return total + (!record ? 4 : Math.max(1, 5 - record.streak + record.wrong * 2))
-    }, 0)
-    return Array.from({ length: Math.max(1, weight) }, () => unit)
-  })
-  return weighted[Math.floor(Math.random() * weighted.length)] ?? units[0]
+  if (unitIds.length === 0) return null
+
+  const unitIdSet = new Set(unitIds)
+  const remainingQueue = queue.filter((id) => id !== currentId && unitIdSet.has(id))
+  const nextQueue =
+    requeueCurrent && currentId && unitIdSet.has(currentId)
+      ? [...remainingQueue, currentId]
+      : remainingQueue
+
+  if (nextQueue.length > 0) {
+    const [nextId, ...rest] = nextQueue
+    return { currentId: nextId, queue: rest }
+  }
+
+  return buildInitialQuestionDeckFromIds(unitIds)
+}
+
+function shuffleQuestionIds(ids: string[]) {
+  return seededShuffle(ids, crypto.randomUUID())
 }
 
 function findQuestionOverride(bank: QuestionBank, questionId: string) {
@@ -1570,6 +1765,22 @@ function updateRecord(record: ProgressRecord, isCorrect: boolean, now: number) {
     ease,
     dueAt: now + interval,
     lastSeenAt: now,
+  }
+}
+
+function forceLearningAttemptRetry(response: TutorResponse): TutorResponse {
+  return {
+    ...response,
+    isCorrect: false,
+    score: 0,
+    verdict: 'Learning attempt - repeat this question',
+    nextPrompt: 'Try this again later without using I don\'t know first.',
+    explanation: [
+      '**This attempt is recorded as 0% because you used "I don\'t know" before answering.**',
+      'Use the feedback to repair the concept, but the question will repeat until you can retrieve it cold.',
+      '',
+      response.explanation,
+    ].join('\n\n'),
   }
 }
 

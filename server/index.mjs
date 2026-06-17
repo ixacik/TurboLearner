@@ -10,6 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appRoot = path.resolve(__dirname, '..')
 const app = express()
 const port = Number(process.env.TURBOLEARNER_API_PORT || 8787)
+const codexRequestTimeoutMs = Number(process.env.TURBOLEARNER_CODEX_REQUEST_TIMEOUT_MS || 30_000)
+const codexTurnTimeoutMs = Number(process.env.TURBOLEARNER_CODEX_TURN_TIMEOUT_MS || 90_000)
 
 const tutorThreads = new Map()
 let codex
@@ -244,16 +246,19 @@ grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Shor
 For grouped questions, include child question scores when possible:
 grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Short follow-up question","questionScores":{"question-id":1},"questionCorrectness":{"question-id":true}})
 
-For multiple-choice questions when you know the correct option id or ids, include a final hidden
-answer key line immediately before grade, or as the final line when grade is not used:
-answerKey({"correctOptionIds":["A","B"]})
+For multiple-choice questions when you know the correct canonical option id or ids, include a final hidden
+answer key line immediately before grade, or as the final line when grade is not used. Use option.id,
+not option.visibleLabel, in answerKey:
+answerKey({"correctOptionIds":["opt_example1","opt_example2"]})
 For grouped questions, key answers by child question id:
-answerKey({"correctOptionIdsByQuestion":{"question-id-1":["B"],"question-id-2":["A","C"]}})
+answerKey({"correctOptionIdsByQuestion":{"question-id-1":["opt_example3"],"question-id-2":["opt_example4","opt_example5"]}})
 
 Use score as a decimal from 0 to 1. Use isCorrect=true when the answer is substantially correct.
 The grade and answerKey lines are tool calls for the app, not learner-facing prose.
 
-For follow-up chat, answer the learner's question in Markdown and keep using the same tutoring style. If the learner asks for the answer, give it and explain why.
+For follow-up chat, answer the learner's question in Markdown and keep using the same tutoring style.
+Before submission, follow the pre-submit hint rules and do not reveal the answer. After submission,
+you may give the correct answer when relevant.
 `.trim()
 }
 
@@ -273,12 +278,15 @@ ${JSON.stringify(payload.answer, null, 2)}
 Rules:
 - If question.type is "group", grade every child in question.questions against the matching entry in answer.subAnswers, then give one overall score. Mention each subquestion briefly.
 - For grouped questions, include questionScores and questionCorrectness in the hidden grade line keyed by child question id.
-- For multiple-choice questions, compare selected option ids/text against the correct answer if present.
+- For multiple-choice questions, compare selected option ids/text against the correct answer if present. Option id is the canonical answer identity; visibleLabel is only the shuffled label shown to the learner.
 - Prefer question.answer.correctOptionIds or question.answer.expectedText when present. If those are missing, use legacy question.correctOptionIds if present.
 - If no official answer is present, infer the answer from the concept and say that you inferred it.
 - Do not only tell the learner whether they are correct. Give the correct answer, explain the concept, and connect related concepts.
+- For every open question, include a "Model answer" section even when the learner is correct. Put the model answer itself in a Markdown blockquote. Make it concise, exam-ready, and phrased the way a strong university answer should be written.
+- For grouped questions with open child questions, include a separate model answer blockquote for each open child question under that child's feedback.
+- For every multiple-choice question, include an option-by-option rationale that explicitly says why each available option is right or wrong. For grouped multiple-choice questions, do this under each child question.
 - Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
-- For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with the correct option ids.
+- For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with canonical option.id values, not visibleLabel values. In the visible explanation, mention visibleLabel for the learner, but keep answerKey canonical.
 - For grouped multiple-choice questions, include answerKey({"correctOptionIdsByQuestion":{...}}) keyed by child question id.
 `.trim()
 }
@@ -289,6 +297,9 @@ function buildFollowUpPrompt(payload) {
     .find((message) => message.role === 'learner')
   const isPreSubmit = payload.phase === 'pre_submit'
   const currentQuestion = isPreSubmit ? questionWithoutAnswerKey(payload.question) : payload.question
+  const request = typeof payload.request === 'string' && payload.request.trim()
+    ? payload.request.trim()
+    : latestUserMessage?.content ?? ''
 
   return `
 The learner is asking a follow-up in the same tutoring session.
@@ -302,8 +313,8 @@ ${JSON.stringify(payload.answer, null, 2)}
 Conversation so far:
 ${formatConversation(payload.messages)}
 
-Follow-up question:
-${JSON.stringify(latestUserMessage?.content ?? '', null, 2)}
+Learner request:
+${JSON.stringify(request, null, 2)}
 
 Answer conversationally in Markdown. Do not call grade for ordinary follow-up chat.
 Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
@@ -334,7 +345,7 @@ Rules:
 - Include a compact worked example or analogy when it helps.
 - End with a short checklist the learner can use to recognize this concept next time.
 - Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
-- For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with the correct option ids as the final line.
+- For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with canonical option.id values, not visibleLabel values, as the final line.
 - Do not call grade.
 `.trim()
 }
@@ -355,10 +366,15 @@ function formatConversation(messages) {
 function preSubmitHintRules() {
   return `
 This is before the learner has submitted for grading.
-- Do not reveal the correct answer, correct option id, final formula, or whether their current choice is right.
-- Explain the underlying concept, define terms, show a parallel example with different numbers/details, or ask a guiding question.
+- If the learner says they do not know, teach the underlying concept from first principles in a compact textbook style.
+- Preserve desirable difficulty: the learner must still have to reason through and submit an answer.
+- Do not reveal the correct answer, correct option id, final formula for this exact question, elimination path, or whether their current choice is right.
+- Do not discuss each answer option, narrow the choices to a small set, or map the explanation directly onto the options.
+- Use a parallel example with different numbers/details when useful, but do not solve this exact prompt.
+- End with one guiding question or recognition cue that helps them decide what idea applies.
 - If they directly ask for the answer, refuse briefly and give a useful hint instead.
-- Keep it focused on helping them reason to the answer themselves.
+- Do not call grade or answerKey.
+- Keep it focused on helping them reason to the answer themselves without making the answer immediately inferable.
 `.trim()
 }
 
@@ -637,13 +653,14 @@ class CodexAppServer {
     this.readyPromise = null
   }
 
-  async request(method, params) {
+  async request(method, params, timeoutMs = codexRequestTimeoutMs) {
     await this.ensureStarted()
-    const id = this.nextId++
-    this.proc.stdin.write(`${JSON.stringify({ method, id, params })}\n`)
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-    })
+    try {
+      return await this.rawRequest(method, params, timeoutMs)
+    } catch (error) {
+      if (error instanceof CodexTimeoutError) this.restart(error.message)
+      throw error
+    }
   }
 
   async startTurn({ threadId, input, cwd, approvalPolicy, sandboxPolicy, onNotification }) {
@@ -658,13 +675,33 @@ class CodexAppServer {
     const turnId = result.turn.id
 
     return new Promise((resolve, reject) => {
-      this.activeTurns.set(turnId, { threadId, onNotification, resolve, reject })
+      const timer = setTimeout(() => {
+        this.activeTurns.delete(turnId)
+        this.restart(`Codex turn timed out after ${codexTurnTimeoutMs}ms.`)
+        reject(new CodexTimeoutError(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s.`))
+      }, codexTurnTimeoutMs)
+
+      this.activeTurns.set(turnId, {
+        threadId,
+        onNotification,
+        resolve: (value) => {
+          clearTimeout(timer)
+          resolve(value)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      })
     })
   }
 
   async ensureStarted() {
     if (this.readyPromise) return this.readyPromise
-    this.readyPromise = this.start()
+    this.readyPromise = this.start().catch((error) => {
+      this.stopProcess(error)
+      throw error
+    })
     return this.readyPromise
   }
 
@@ -685,6 +722,7 @@ class CodexAppServer {
       for (const turn of this.activeTurns.values()) turn.reject(error)
       this.pending.clear()
       this.activeTurns.clear()
+      tutorThreads.clear()
       this.readyPromise = null
       this.proc = null
       this.rl = null
@@ -705,11 +743,25 @@ class CodexAppServer {
     return initialized
   }
 
-  rawRequest(method, params) {
+  rawRequest(method, params, timeoutMs = codexRequestTimeoutMs) {
     const id = this.nextId++
     this.proc.stdin.write(`${JSON.stringify({ method, id, params })}\n`)
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new CodexTimeoutError(`Codex ${method} request timed out after ${Math.round(timeoutMs / 1000)}s.`))
+      }, timeoutMs)
+
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer)
+          resolve(value)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      })
     })
   }
 
@@ -743,5 +795,32 @@ class CodexAppServer {
       this.activeTurns.delete(turnId)
       activeTurn.resolve(message.params)
     }
+  }
+
+  restart(reason) {
+    console.warn(`Restarting Codex app-server: ${reason}`)
+    this.stopProcess(new Error(reason))
+  }
+
+  stopProcess(error = new Error('Codex app-server stopped.')) {
+    for (const pending of this.pending.values()) pending.reject(error)
+    for (const turn of this.activeTurns.values()) turn.reject(error)
+    this.pending.clear()
+    this.activeTurns.clear()
+    tutorThreads.clear()
+    this.readyPromise = null
+
+    const proc = this.proc
+    this.proc = null
+    this.rl?.close()
+    this.rl = null
+    if (proc && !proc.killed) proc.kill()
+  }
+}
+
+class CodexTimeoutError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'CodexTimeoutError'
   }
 }
