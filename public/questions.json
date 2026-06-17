@@ -36,7 +36,7 @@
       "concepts": "optional tags used for review and generation"
     }
   },
-  "generatedAt": "2026-06-17T10:26:55.966Z",
+  "generatedAt": "2026-06-17T17:14:38.841Z",
   "sets": [
     {
       "id": "practice-exam",
@@ -944,7 +944,7 @@
           "imagePaths": [],
           "groupId": "practice-exam-q25",
           "groupTitle": "Question 25",
-          "groupPrompt": "A data scientist released his Python code on GitHub that implements the best split for decision trees. You would like to use his code in your project for developing decision trees. The code is as follows:\n\nPython code shown in practice exam.",
+          "groupPrompt": "A data scientist released his Python code on GitHub that implements the best split for decision trees. You would like to use his code in your project for developing decision trees. The code is as follows:\n\n\n\n<code lang=\"python\">\ndef _best_split(self, features, labels):\n    \"\"\"Determine the best feature to split on.\n\n    :param features: a pd.DataFrame with named training feature columns\n    :param labels: a pd.Series or pd.DataFrame with training labels\n    :return: `best_so_far` is a string with the name of the best feature,\n        and `best_so_far_loss` is the loss on that feature\n\n    For each candidate feature the weighted loss of the \"yes\" and \"no\"\n    instances for that feature are computed using self._metric (Impurity metric).\n\n    We select the feature with the lowest weighted loss.\n    \"\"\"\n    best_so_far = None\n    best_so_far_loss = 1  # we are only interested in splits that are better than the parent\n    for candidate in features.columns:\n        yes_index = features[candidate] > 0.5\n        yes_labels = labels[yes_index]\n        no_labels = labels[~yes_index]\n        yes_loss = self._metric(yes_labels)  # Impurity metric\n        no_loss = self._metric(no_labels)\n        candidate_loss = (\n            yes_loss * (len(yes_labels) / len(labels))\n            + no_loss * (len(no_labels) / len(labels))\n        )\n        if candidate_loss > best_so_far_loss:\n            best_so_far = candidate\n            best_so_far_loss = candidate_loss\n    return best_so_far, best_so_far_loss\n</code>\n\n",
           "groupOrder": 0,
           "concepts": [
             "decision-trees"
@@ -968,7 +968,7 @@
           "imagePaths": [],
           "groupId": "practice-exam-q25",
           "groupTitle": "Question 25",
-          "groupPrompt": "A data scientist released his Python code on GitHub that implements the best split for decision trees. You would like to use his code in your project for developing decision trees. The code is as follows:\n\nPython code shown in practice exam.",
+          "groupPrompt": "A data scientist released his Python code on GitHub that implements the best split for decision trees. You would like to use his code in your project for developing decision trees. The code is as follows:\n\n\n\n<code lang=\"python\">\ndef _best_split(self, features, labels):\n    \"\"\"Determine the best feature to split on.\n\n    :param features: a pd.DataFrame with named training feature columns\n    :param labels: a pd.Series or pd.DataFrame with training labels\n    :return: `best_so_far` is a string with the name of the best feature,\n        and `best_so_far_loss` is the loss on that feature\n\n    For each candidate feature the weighted loss of the \"yes\" and \"no\"\n    instances for that feature are computed using self._metric (Impurity metric).\n\n    We select the feature with the lowest weighted loss.\n    \"\"\"\n    best_so_far = None\n    best_so_far_loss = 1  # we are only interested in splits that are better than the parent\n    for candidate in features.columns:\n        yes_index = features[candidate] > 0.5\n        yes_labels = labels[yes_index]\n        no_labels = labels[~yes_index]\n        yes_loss = self._metric(yes_labels)  # Impurity metric\n        no_loss = self._metric(no_labels)\n        candidate_loss = (\n            yes_loss * (len(yes_labels) / len(labels))\n            + no_loss * (len(no_labels) / len(labels))\n        )\n        if candidate_loss > best_so_far_loss:\n            best_so_far = candidate\n            best_so_far_loss = candidate_loss\n    return best_so_far, best_so_far_loss\n</code>\n\n",
           "groupOrder": 1,
           "concepts": [
             "decision-trees"

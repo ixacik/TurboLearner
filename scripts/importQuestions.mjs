@@ -309,14 +309,19 @@ function cleanSharedContext(context) {
 }
 
 function normalizeStructuredTags(text) {
-  return text
-    .replace(/```([\w-]+)?\n([\s\S]*?)```/g, (_, lang = '', code = '') => {
-      const langAttribute = lang ? ` lang="${lang}"` : ''
-      return `\n\n<code${langAttribute}>\n${code.trimEnd()}\n</code>\n\n`
-    })
+  const codeBlocks = []
+  const protectedText = text.replace(/```([\w-]+)?\n([\s\S]*?)```/g, (_, lang = '', code = '') => {
+    const langAttribute = lang ? ` lang="${lang}"` : ''
+    const placeholder = `@@TURBOLEARNER_CODE_BLOCK_${codeBlocks.length}@@`
+    codeBlocks.push(`\n\n<code${langAttribute}>\n${code.trimEnd()}\n</code>\n\n`)
+    return placeholder
+  })
+
+  return protectedText
     .replace(/`([^`\n]+)`/g, (_, code = '') => inlineBacktickTag(code))
     .replace(/\$\$([\s\S]*?)\$\$/g, (_, math = '') => `<math display>${math.trim()}</math>`)
     .replace(/\$([^$\n]+)\$/g, (_, math = '') => `<math>${math.trim()}</math>`)
+    .replace(/@@TURBOLEARNER_CODE_BLOCK_(\d+)@@/g, (_, index) => codeBlocks[Number(index)] ?? '')
 }
 
 function inlineBacktickTag(rawCode) {

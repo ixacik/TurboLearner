@@ -1,6 +1,6 @@
 # Question Bank Audit
 
-Generated: 2026-06-17T10:26:56.136Z
+Generated: 2026-06-17T17:14:44.210Z
 
 This checks `public/questions.json` against the question structure sent in chat and the known grouping rules.
 
@@ -11,6 +11,7 @@ This checks `public/questions.json` against the question structure sent in chat 
 - PASS: Extra numbers — none
 - PASS: Order matches chat capture — yes
 - PASS: No raw screenshot paths — none
+- PASS: No missing source placeholders — none
 - PASS: No open questions with options — none
 - PASS: Group practice-exam-q25 — 25a, 25b
 - PASS: No image for text/code question 23a — none
@@ -18,7 +19,7 @@ This checks `public/questions.json` against the question structure sent in chat 
 Notes:
 
 - Lettered questions without a shared group: 23a, 23b, 23c
-- Questions with placeholder text: 25a, 25b
+- Questions with placeholder text: none
 - Single-answer questions with non-4 option counts: 1(5), 2(5), 3(5), 4(5), 8(3), 10(3)
 
 ## Last Year's Exam
@@ -28,6 +29,7 @@ Notes:
 - PASS: Extra numbers — none
 - PASS: Order matches chat capture — yes
 - PASS: No raw screenshot paths — none
+- PASS: No missing source placeholders — none
 - PASS: No open questions with options — none
 - PASS: Group last-year-exam-q18 — 18a, 18b, 18c, 18d
 - PASS: Group last-year-exam-q19 — 19a, 19b, 19c, 19d

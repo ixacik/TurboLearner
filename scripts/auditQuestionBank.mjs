@@ -113,7 +113,9 @@ for (const [setId, expectation] of Object.entries(expected)) {
     (question) => /^\d+[a-z]+$/i.test(question.number) && !question.groupId,
   )
   const placeholders = set.questions.filter((question) =>
-    `${question.prompt}\n${question.groupPrompt ?? ''}`.includes('Python code shown'),
+    /Python code shown|Missing source capture/i.test(
+      `${question.prompt}\n${question.groupPrompt ?? ''}`,
+    ),
   )
   const openWithOptions = set.questions.filter(
     (question) => question.type === 'open' && question.options.length > 0,
@@ -127,6 +129,7 @@ for (const [setId, expectation] of Object.entries(expected)) {
   pushCheck(lines, 'Extra numbers', extra.length === 0, extra.join(', ') || 'none')
   pushCheck(lines, 'Order matches chat capture', !outOfOrder, outOfOrder ? `actual: ${actualNumbers.join(', ')}` : 'yes')
   pushCheck(lines, 'No raw screenshot paths', rawScreenshotRefs.length === 0, rawScreenshotRefs.map((question) => question.number).join(', ') || 'none')
+  pushCheck(lines, 'No missing source placeholders', placeholders.length === 0, placeholders.map((question) => question.number).join(', ') || 'none')
   pushCheck(lines, 'No open questions with options', openWithOptions.length === 0, openWithOptions.map((question) => question.number).join(', ') || 'none')
 
   for (const [groupId, expectedMembers] of Object.entries(expectation.expectedGroups)) {
@@ -160,6 +163,7 @@ for (const [setId, expectation] of Object.entries(expected)) {
     extra.length ||
     outOfOrder ||
     rawScreenshotRefs.length ||
+    placeholders.length ||
     openWithOptions.length
   ) {
     hasFailure = true

@@ -1,5 +1,20 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type {
+  ComponentProps,
+  CSSProperties,
+  PointerEvent as ReactPointerEvent,
+  RefObject,
+} from 'react'
 import Markdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -123,13 +138,8 @@ type TutorMessage = {
   kind?: 'chat' | 'grading' | 'learning' | 'pending' | 'grading-pending' | 'learning-pending'
 }
 
-function appendToLastTutorMessage(messages: TutorMessage[], delta: string) {
-  const next = [...messages]
-  const last = next.at(-1)
-  if (last?.role === 'tutor') {
-    next[next.length - 1] = { ...last, content: last.content + delta }
-  }
-  return next
+type ChatComposerHandle = {
+  focus: () => void
 }
 
 function persistedTutorMessages(messages: TutorMessage[]) {
@@ -165,6 +175,7 @@ const defaultCodexSidebarWidth = 480
 const minCodexSidebarWidth = 360
 const maxCodexSidebarWidth = 760
 const codexAutoScrollThreshold = 32
+const localStatePersistenceDelayMs = 250
 const codeLanguageAliases: Record<string, string> = {
   js: 'javascript',
   jsx: 'jsx',
@@ -173,6 +184,65 @@ const codeLanguageAliases: Record<string, string> = {
   shell: 'bash',
   ts: 'typescript',
   tsx: 'tsx',
+}
+
+const markdownRemarkPlugins = [remarkGfm, remarkMath]
+const markdownRehypePlugins = [rehypeKatex]
+const markdownComponents = {
+  table(props: ComponentProps<'table'>) {
+    return (
+      <div className="markdown-table-wrap">
+        <table {...props} />
+      </div>
+    )
+  },
+  code(props: ComponentProps<'code'>) {
+    const { children: codeChildren, className } = props
+    const match = /language-([\w-]+)/.exec(className || '')
+    const code = String(codeChildren).replace(/\n$/, '')
+    const rawLanguage = match?.[1]?.toLowerCase()
+    const language = rawLanguage ? codeLanguageAliases[rawLanguage] ?? rawLanguage : null
+
+    if (language === 'mermaid') return <MermaidDiagram chart={code} />
+    if (language) {
+      return (
+        <SyntaxHighlighter
+          className="markdown-code-block"
+          codeTagProps={{ className: 'markdown-code' }}
+          customStyle={{
+            margin: 0,
+            padding: '16px',
+            borderRadius: '6px',
+            background: 'var(--code-bg)',
+            fontSize: '0.95em',
+            lineHeight: 1.55,
+          }}
+          language={language}
+          PreTag="div"
+          style={oneDark}
+          wrapLongLines
+        >
+          {code}
+        </SyntaxHighlighter>
+      )
+    }
+
+    return (
+      <code className={className}>
+        {codeChildren}
+      </code>
+    )
+  },
+  img(props: ComponentProps<'img'>) {
+    const { src, alt } = props
+    return (
+      <img
+        src={resolveImageSource(src)}
+        alt={alt || 'Question attachment'}
+        loading="lazy"
+      />
+    )
+  },
 }
 
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' })
@@ -202,8 +272,8 @@ function App() {
     activeMessagesKey,
     [],
     persistedTutorMessages,
+    { persistenceDelayMs: localStatePersistenceDelayMs },
   )
-  const [chatInput, setChatInput] = useState('')
   const [isGrading, setIsGrading] = useState(false)
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false)
   const [codexStatus, setCodexStatus] = useState('')
@@ -212,7 +282,12 @@ function App() {
     defaultCodexSidebarWidth,
   )
   const [isResizingSidebar, setIsResizingSidebar] = useState(false)
-  const [streamingTutorMessage, setStreamingTutorMessage] = useState('')
+  const {
+    text: streamingTutorMessage,
+    append: appendStreamingTutorMessage,
+    clear: clearStreamingTutorMessage,
+  } = useBatchedStreamingText()
+  const [streamingMessageKind, setStreamingMessageKind] = useState<TutorMessage['kind'] | null>(null)
   const [tutorSessionId, setTutorSessionId] = useLocalState(
     activeTutorSessionKey,
     crypto.randomUUID(),
@@ -226,7 +301,7 @@ function App() {
     false,
   )
   const [error, setError] = useState<string | null>(null)
-  const chatTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const chatComposerRef = useRef<ChatComposerHandle>(null)
   const codexLogRef = useRef<HTMLDivElement>(null)
   const shouldFollowCodexStreamRef = useRef(true)
   const isUserScrollingCodexRef = useRef(false)
@@ -253,10 +328,10 @@ function App() {
         setAnswersByQuestion({})
         setResult(null)
         setMessages([])
-        setChatInput('')
         setIsSubmittingAnswer(false)
         setCodexStatus('')
-        setStreamingTutorMessage('')
+        clearStreamingTutorMessage()
+        setStreamingMessageKind(null)
         setTutorSessionId(crypto.randomUUID())
         setError(null)
       })
@@ -264,6 +339,7 @@ function App() {
   }, [
     setAnswersByQuestion,
     setCurrentId,
+    clearStreamingTutorMessage,
     setMessages,
     setQuestionQueue,
     setResult,
@@ -294,8 +370,12 @@ function App() {
   const units = useMemo(() => buildQuestionUnits(questions), [questions])
   const currentUnit = units.find((unit) => unit.id === currentId) ?? null
 
-  const last25 = history.slice(0, 25)
-  const correctLast25 = last25.filter((item) => item.isCorrect).length
+  const last25 = useMemo(() => history.slice(0, 25), [history])
+  const correctLast25 = useMemo(
+    () => last25.filter((item) => item.isCorrect).length,
+    [last25],
+  )
+  const seenQuestionCount = useMemo(() => Object.keys(progress).length, [progress])
   const canSubmitAnswer = currentUnit ? isUnitAnswered(currentUnit, answersByQuestion) : false
   const boundedCodexSidebarWidth = clamp(
     codexSidebarWidth,
@@ -305,7 +385,6 @@ function App() {
   const appShellStyle = {
     '--codex-sidebar-width': `${boundedCodexSidebarWidth}px`,
   } as CSSProperties
-
   const scrollCodexLogToBottom = useCallback(() => {
     const log = codexLogRef.current
     if (!log) return
@@ -337,13 +416,6 @@ function App() {
     }
     shouldFollowCodexStreamRef.current = isScrolledNearBottom(log)
   }, [])
-
-  useLayoutEffect(() => {
-    const textarea = chatTextareaRef.current
-    if (!textarea) return
-
-    autoGrowTextarea(textarea)
-  }, [chatInput, result])
 
   useLayoutEffect(() => {
     if (!shouldFollowCodexStreamRef.current) return
@@ -394,16 +466,17 @@ function App() {
     setIsAnswerKeyRevealed(false)
     setRevealedCorrectOptionIdsByQuestion({})
     setMessages([])
-    setChatInput('')
     setIsSubmittingAnswer(false)
     setCodexStatus('')
-    setStreamingTutorMessage('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind(null)
     setTutorSessionId(crypto.randomUUID())
     setOptionOrderSeed(crypto.randomUUID())
     setUsedLearningBeforeAnswer(false)
     setError(null)
   }, [
     followCodexStream,
+    clearStreamingTutorMessage,
     setAnswersByQuestion,
     setIsAnswerKeyRevealed,
     setRevealedCorrectOptionIdsByQuestion,
@@ -436,7 +509,15 @@ function App() {
     units,
   ])
 
-  function startSet(setId: string) {
+  const handleNextQuestionAfterResult = useCallback(() => {
+    if (result) showNextQuestion(!result.isCorrect)
+  }, [result, showNextQuestion])
+
+  const handleSkipQuestion = useCallback(() => {
+    showNextQuestion()
+  }, [showNextQuestion])
+
+  const startSet = useCallback((setId: string) => {
     setSelectedSetId(setId)
     const nextSet = allSets.find((set) => set.id === setId)
     resetQuestionState()
@@ -445,18 +526,23 @@ function App() {
     const initialDeck = buildInitialQuestionDeck(buildQuestionUnits(nextSet.questions))
     setCurrentId(initialDeck.currentId)
     setQuestionQueue(initialDeck.queue)
-  }
+  }, [
+    allSets,
+    resetQuestionState,
+    setCurrentId,
+    setQuestionQueue,
+    setSelectedSetId,
+  ])
 
-  function returnToMenu() {
+  const returnToMenu = useCallback(() => {
     setSelectedSetId(null)
     setCurrentId(null)
     setQuestionQueue([])
     resetQuestionState()
-  }
+  }, [resetQuestionState, setCurrentId, setQuestionQueue, setSelectedSetId])
 
-  function toggleOption(question: Question, optionId: string) {
+  const toggleOption = useCallback((question: Question, optionId: string) => {
     if (result) return
-    const existing = answersByQuestion[question.id]?.selectedOptionIds ?? []
     if (question.type === 'single') {
       setAnswersByQuestion((answers) => ({
         ...answers,
@@ -464,21 +550,22 @@ function App() {
       }))
       return
     }
-    const selectedOptionIds = existing.includes(optionId)
-      ? existing.filter((id) => id !== optionId)
-      : [...existing, optionId]
     setAnswersByQuestion((answers) => ({
       ...answers,
-      [question.id]: { selectedOptionIds },
+      [question.id]: {
+        selectedOptionIds: (answers[question.id]?.selectedOptionIds ?? []).includes(optionId)
+          ? (answers[question.id]?.selectedOptionIds ?? []).filter((id) => id !== optionId)
+          : [...(answers[question.id]?.selectedOptionIds ?? []), optionId],
+      },
     }))
-  }
+  }, [result, setAnswersByQuestion])
 
-  function updateOpenAnswer(questionId: string, text: string) {
+  const updateOpenAnswer = useCallback((questionId: string, text: string) => {
     setAnswersByQuestion((answers) => ({
       ...answers,
       [questionId]: { text },
     }))
-  }
+  }, [setAnswersByQuestion])
 
   const recordAnswer = useCallback((unit: QuestionUnit, tutorResponse: TutorResponse) => {
     const now = Date.now()
@@ -514,10 +601,10 @@ function App() {
     setIsSubmittingAnswer(true)
     followCodexStream()
     setCodexStatus('Asking Codex...')
-    setStreamingTutorMessage('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind('grading-pending')
     setError(null)
     const previousMessages = persistedTutorMessages(messages)
-    setMessages([...previousMessages, { role: 'tutor', content: '', kind: 'grading-pending' }])
     try {
       const tutorQuestion = buildTutorQuestion(currentUnit)
       const tutorResponse = await postTutorStream(
@@ -527,13 +614,11 @@ function App() {
           mode: 'submit',
           question: tutorQuestion,
           answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
-          messages,
+          messages: previousMessages,
         },
         {
           onStatus: setCodexStatus,
-          onDelta: (delta) => {
-            setMessages((existing) => appendToLastTutorMessage(existing, delta))
-          },
+          onDelta: appendStreamingTutorMessage,
         },
       )
       const responseCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(
@@ -564,10 +649,13 @@ function App() {
       setIsGrading(false)
       setIsSubmittingAnswer(false)
       setCodexStatus('')
-      setStreamingTutorMessage('')
+      clearStreamingTutorMessage()
+      setStreamingMessageKind(null)
     }
   }, [
+    appendStreamingTutorMessage,
     answersByQuestion,
+    clearStreamingTutorMessage,
     currentUnit,
     followCodexStream,
     isGrading,
@@ -577,6 +665,7 @@ function App() {
     setMessages,
     setRevealedCorrectOptionIdsByQuestion,
     setResult,
+    setStreamingMessageKind,
     tutorSessionId,
     revealedCorrectOptionIdsByQuestion,
     usedLearningBeforeAnswer,
@@ -626,7 +715,8 @@ function App() {
     setIsGrading(true)
     followCodexStream()
     setCodexStatus('Teaching the concept...')
-    setStreamingTutorMessage('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind('learning-pending')
     setError(null)
     const learningPrompt = [
       'I do not know this yet.',
@@ -635,10 +725,6 @@ function App() {
       'Leave me with desirable difficulty so I still have to reason and submit an answer myself.',
     ].join(' ')
     const previousMessages = persistedTutorMessages(messages)
-    setMessages([
-      ...previousMessages,
-      { role: 'tutor', content: '', kind: 'learning-pending' },
-    ])
     try {
       const tutorResponse = await postTutorStream(
         '/api/explain',
@@ -653,9 +739,7 @@ function App() {
         },
         {
           onStatus: setCodexStatus,
-          onDelta: (delta) => {
-            setMessages((existing) => appendToLastTutorMessage(existing, delta))
-          },
+          onDelta: appendStreamingTutorMessage,
         },
       )
       setUsedLearningBeforeAnswer(true)
@@ -669,15 +753,19 @@ function App() {
     } finally {
       setIsGrading(false)
       setCodexStatus('')
-      setStreamingTutorMessage('')
+      clearStreamingTutorMessage()
+      setStreamingMessageKind(null)
     }
   }, [
+    appendStreamingTutorMessage,
     answersByQuestion,
+    clearStreamingTutorMessage,
     currentUnit,
     followCodexStream,
     isGrading,
     messages,
     setMessages,
+    setStreamingMessageKind,
     setUsedLearningBeforeAnswer,
     tutorSessionId,
   ])
@@ -692,7 +780,7 @@ function App() {
         !event.altKey
       ) {
         event.preventDefault()
-        chatTextareaRef.current?.focus()
+        chatComposerRef.current?.focus()
         return
       }
 
@@ -715,23 +803,20 @@ function App() {
     return () => window.removeEventListener('keydown', handleShortcut)
   }, [canSubmitAnswer, currentUnit, isGrading, result, showNextQuestion, submitAnswer])
 
-  async function sendChat() {
-    if (!currentUnit || !chatInput.trim() || isGrading) return
+  const sendChat = useCallback(async (input: string) => {
+    const trimmedInput = input.trim()
+    if (!currentUnit || !trimmedInput || isGrading) return
     const nextMessages: TutorMessage[] = [
       ...persistedTutorMessages(messages),
-      { role: 'learner', content: chatInput.trim() },
+      { role: 'learner', content: trimmedInput },
     ]
     followCodexStream()
     setMessages(nextMessages)
-    setChatInput('')
     setIsGrading(true)
     setCodexStatus('Asking Codex...')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind('pending')
     try {
-      const pendingMessages: TutorMessage[] = [
-        ...nextMessages,
-        { role: 'tutor', content: '', kind: 'pending' },
-      ]
-      setMessages(pendingMessages)
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
@@ -744,15 +829,7 @@ function App() {
         },
         {
           onStatus: setCodexStatus,
-          onDelta: (delta) => {
-            setMessages((existing) => appendToLastTutorMessage(existing, delta))
-          },
-          onFinal: (streamedResponse) => {
-            setMessages([
-              ...nextMessages,
-              { role: 'tutor', content: streamedResponse.explanation },
-            ])
-          },
+          onDelta: appendStreamingTutorMessage,
         },
       )
       setMessages([...nextMessages, { role: 'tutor', content: tutorResponse.explanation }])
@@ -762,8 +839,22 @@ function App() {
     } finally {
       setIsGrading(false)
       setCodexStatus('')
+      clearStreamingTutorMessage()
+      setStreamingMessageKind(null)
     }
-  }
+  }, [
+    answersByQuestion,
+    appendStreamingTutorMessage,
+    clearStreamingTutorMessage,
+    currentUnit,
+    followCodexStream,
+    isGrading,
+    messages,
+    result,
+    setMessages,
+    setStreamingMessageKind,
+    tutorSessionId,
+  ])
 
   if (!bank) {
     return (
@@ -790,112 +881,28 @@ function App() {
       className={`app-shell ${isResizingSidebar ? 'resizing-sidebar' : ''}`}
       style={appShellStyle}
     >
-      <section className="trainer-panel">
-        <header className="study-header">
-          <div className="study-title">
-            <button className="ghost-button" type="button" onClick={returnToMenu}>
-              Menu
-            </button>
-            <div>
-              <h1>{activeSet.title}</h1>
-            </div>
-          </div>
-          <div className="study-metrics">
-            <Stat label="Last 25" value={`${correctLast25}/${Math.max(25, last25.length || 25)}`} />
-            <Stat label="Seen" value={String(Object.keys(progress).length)} />
-          </div>
-          <div className="history-strip" aria-label="Last 25 answers">
-            {Array.from({ length: 25 }).map((_, index) => {
-              const item = last25[index]
-              return (
-                <span
-                  key={index}
-                  className={`history-dot ${
-                    item ? (item.isCorrect ? 'correct' : 'wrong') : ''
-                  }`}
-                  title={item?.title ?? 'No answer yet'}
-                />
-              )
-            })}
-          </div>
-        </header>
-
-        <div className="question-scroll">
-          <article className="question-card">
-            {currentUnit.sharedPrompt && (
-              <div className="shared-question-context">
-                <MarkdownBlock className="question-prose">{currentUnit.sharedPrompt}</MarkdownBlock>
-              </div>
-            )}
-            <div className={currentUnit.questions.length > 1 ? 'question-group' : undefined}>
-              {currentUnit.questions.map((question) => (
-                <QuestionPrompt
-                  key={question.id}
-                  question={question}
-                  answer={answersByQuestion[question.id] ?? {}}
-                  disabled={Boolean(result) || isAnswerKeyRevealed}
-                  showAnswerKey={Boolean(result) || isAnswerKeyRevealed}
-                  openAnswerState={getOpenAnswerState(currentUnit, question, result)}
-                  revealedCorrectOptionIds={revealedCorrectOptionIdsByQuestion[question.id] ?? []}
-                  showHeading={currentUnit.questions.length > 1}
-                  onToggleOption={toggleOption}
-                  onOpenAnswerChange={updateOpenAnswer}
-                />
-              ))}
-            </div>
-          </article>
-        </div>
-
-        {!isSubmittingAnswer && (
-          <div className="action-row">
-            {result ? (
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => showNextQuestion(!result.isCorrect)}
-                disabled={isGrading}
-                aria-keyshortcuts="Meta+Enter"
-                title="Command+Enter"
-              >
-                Next question
-              </button>
-            ) : (
-              <>
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={submitAnswer}
-                  disabled={!canSubmitAnswer || isGrading}
-                  aria-keyshortcuts="Meta+Enter"
-                  title="Command+Enter"
-                >
-                  Submit answer
-                </button>
-                <div className="secondary-actions">
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={explainConceptBeforeAnswering}
-                    disabled={isGrading}
-                  >
-                    I don&apos;t know
-                  </button>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => showNextQuestion()}
-                    disabled={isGrading}
-                  >
-                    Skip / next
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {error && <div className="error-box">{error}</div>}
-      </section>
+      <TrainerPanel
+        title={activeSet.title}
+        currentUnit={currentUnit}
+        answersByQuestion={answersByQuestion}
+        canSubmitAnswer={canSubmitAnswer}
+        correctLast25={correctLast25}
+        error={error}
+        isAnswerKeyRevealed={isAnswerKeyRevealed}
+        isGrading={isGrading}
+        isSubmittingAnswer={isSubmittingAnswer}
+        last25={last25}
+        onExplainConcept={explainConceptBeforeAnswering}
+        onNextAfterResult={handleNextQuestionAfterResult}
+        onOpenAnswerChange={updateOpenAnswer}
+        onReturnToMenu={returnToMenu}
+        onSkipQuestion={handleSkipQuestion}
+        onSubmitAnswer={submitAnswer}
+        onToggleOption={toggleOption}
+        result={result}
+        revealedCorrectOptionIdsByQuestion={revealedCorrectOptionIdsByQuestion}
+        seenQuestionCount={seenQuestionCount}
+      />
 
       <div
         className="sidebar-resizer"
@@ -934,97 +941,347 @@ function App() {
         }}
       />
 
-      <aside className={`codex-panel ${result?.isCorrect ? 'correct' : result ? 'wrong' : ''}`}>
-        <div className="codex-header">
-          <div>
-            <p className="eyebrow">Codex</p>
-            {result && <h2>{result.verdict}</h2>}
-          </div>
-          {result && <span>{Math.round(result.score * 100)}%</span>}
-        </div>
-
-        <div
-          className="codex-log"
-          ref={codexLogRef}
-          onPointerDown={markCodexLogUserScroll}
-          onScroll={handleCodexLogScroll}
-          onTouchMove={markCodexLogUserScroll}
-          onWheel={markCodexLogUserScroll}
-        >
-          {messages.map((message, index) => (
-            <div
-              key={index}
-              className={`chat-message ${message.role} ${message.kind ? `message-${message.kind}` : ''}`}
-            >
-              {(message.kind === 'grading' ||
-                message.kind === 'grading-pending' ||
-                message.kind === 'learning' ||
-                message.kind === 'learning-pending') && (
-                <div className="graded-result-separator">
-                  {message.kind === 'learning' || message.kind === 'learning-pending'
-                    ? 'Learn from zero'
-                    : 'Graded result'}
-                </div>
-              )}
-              {message.content ? (
-                <MarkdownBlock mode="chat">{message.content}</MarkdownBlock>
-              ) : isGrading && (
-                message.kind === 'pending' ||
-                message.kind === 'grading-pending' ||
-                message.kind === 'learning-pending'
-              ) ? (
-                codexStatus || 'Asking Codex...'
-              ) : null}
-            </div>
-          ))}
-          {isGrading && streamingTutorMessage && messages.length === 0 && (
-            <section className="chat-message tutor">
-              <MarkdownBlock mode="chat">{streamingTutorMessage}</MarkdownBlock>
-            </section>
-          )}
-          {isGrading && !streamingTutorMessage && messages.length === 0 && (
-            <div className="empty-chat">{codexStatus || 'Asking Codex...'}</div>
-          )}
-        </div>
-
-        <div className="codex-compose">
-          <form
-            className="chat-row"
-            onSubmit={(event) => {
-              event.preventDefault()
-              sendChat()
-            }}
-          >
-            <textarea
-              ref={chatTextareaRef}
-              value={chatInput}
-              onChange={(event) => setChatInput(event.target.value)}
-              placeholder="Ask Codex about this question..."
-              disabled={isGrading}
-              rows={1}
-              onKeyDown={(event) => {
-                if (
-                  event.key !== 'Enter' ||
-                  event.shiftKey ||
-                  event.metaKey ||
-                  event.ctrlKey ||
-                  event.altKey ||
-                  event.nativeEvent.isComposing
-                ) {
-                  return
-                }
-                event.preventDefault()
-                sendChat()
-              }}
-            />
-          </form>
-        </div>
-      </aside>
+      <CodexPanel
+        ref={chatComposerRef}
+        codexLogRef={codexLogRef}
+        codexStatus={codexStatus}
+        isGrading={isGrading}
+        messages={messages}
+        onCodexLogScroll={handleCodexLogScroll}
+        onMarkCodexLogUserScroll={markCodexLogUserScroll}
+        onSendChat={sendChat}
+        result={result}
+        resetKey={tutorSessionId}
+        streamingMessageKind={streamingMessageKind}
+        streamingTutorMessage={streamingTutorMessage}
+      />
     </main>
   )
 }
 
-function QuestionPrompt({
+const TrainerPanel = memo(function TrainerPanel({
+  title,
+  currentUnit,
+  answersByQuestion,
+  canSubmitAnswer,
+  correctLast25,
+  error,
+  isAnswerKeyRevealed,
+  isGrading,
+  isSubmittingAnswer,
+  last25,
+  onExplainConcept,
+  onNextAfterResult,
+  onOpenAnswerChange,
+  onReturnToMenu,
+  onSkipQuestion,
+  onSubmitAnswer,
+  onToggleOption,
+  result,
+  revealedCorrectOptionIdsByQuestion,
+  seenQuestionCount,
+}: {
+  title: string
+  currentUnit: QuestionUnit
+  answersByQuestion: Record<string, AnswerPayload>
+  canSubmitAnswer: boolean
+  correctLast25: number
+  error: string | null
+  isAnswerKeyRevealed: boolean
+  isGrading: boolean
+  isSubmittingAnswer: boolean
+  last25: HistoryItem[]
+  onExplainConcept: () => void
+  onNextAfterResult: () => void
+  onOpenAnswerChange: (questionId: string, text: string) => void
+  onReturnToMenu: () => void
+  onSkipQuestion: () => void
+  onSubmitAnswer: () => void
+  onToggleOption: (question: Question, optionId: string) => void
+  result: TutorResponse | null
+  revealedCorrectOptionIdsByQuestion: Record<string, string[]>
+  seenQuestionCount: number
+}) {
+  return (
+    <section className="trainer-panel">
+      <header className="study-header">
+        <div className="study-title">
+          <button className="ghost-button" type="button" onClick={onReturnToMenu}>
+            Menu
+          </button>
+          <div>
+            <h1>{title}</h1>
+          </div>
+        </div>
+        <div className="study-metrics">
+          <Stat label="Last 25" value={`${correctLast25}/${Math.max(25, last25.length || 25)}`} />
+          <Stat label="Seen" value={String(seenQuestionCount)} />
+        </div>
+        <div className="history-strip" aria-label="Last 25 answers">
+          {Array.from({ length: 25 }).map((_, index) => {
+            const item = last25[index]
+            return (
+              <span
+                key={index}
+                className={`history-dot ${item ? (item.isCorrect ? 'correct' : 'wrong') : ''}`}
+                title={item?.title ?? 'No answer yet'}
+              />
+            )
+          })}
+        </div>
+      </header>
+
+      <div className="question-scroll">
+        <article className="question-card">
+          {currentUnit.sharedPrompt && (
+            <div className="shared-question-context">
+              <MarkdownBlock className="question-prose">{currentUnit.sharedPrompt}</MarkdownBlock>
+            </div>
+          )}
+          <div className={currentUnit.questions.length > 1 ? 'question-group' : undefined}>
+            {currentUnit.questions.map((question) => (
+              <QuestionPrompt
+                key={question.id}
+                question={question}
+                answer={answersByQuestion[question.id] ?? {}}
+                disabled={Boolean(result) || isAnswerKeyRevealed}
+                showAnswerKey={Boolean(result) || isAnswerKeyRevealed}
+                openAnswerState={getOpenAnswerState(currentUnit, question, result)}
+                revealedCorrectOptionIds={revealedCorrectOptionIdsByQuestion[question.id] ?? []}
+                showHeading={currentUnit.questions.length > 1}
+                onToggleOption={onToggleOption}
+                onOpenAnswerChange={onOpenAnswerChange}
+              />
+            ))}
+          </div>
+        </article>
+      </div>
+
+      {!isSubmittingAnswer && (
+        <div className="action-row">
+          {result ? (
+            <button
+              className="primary-button"
+              type="button"
+              onClick={onNextAfterResult}
+              disabled={isGrading}
+              aria-keyshortcuts="Meta+Enter"
+              title="Command+Enter"
+            >
+              Next question
+            </button>
+          ) : (
+            <>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={onSubmitAnswer}
+                disabled={!canSubmitAnswer || isGrading}
+                aria-keyshortcuts="Meta+Enter"
+                title="Command+Enter"
+              >
+                Submit answer
+              </button>
+              <div className="secondary-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={onExplainConcept}
+                  disabled={isGrading}
+                >
+                  I don&apos;t know
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={onSkipQuestion}
+                  disabled={isGrading}
+                >
+                  Skip / next
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {error && <div className="error-box">{error}</div>}
+    </section>
+  )
+})
+
+const CodexPanel = memo(forwardRef<ChatComposerHandle, {
+  codexLogRef: RefObject<HTMLDivElement | null>
+  codexStatus: string
+  isGrading: boolean
+  messages: TutorMessage[]
+  onCodexLogScroll: () => void
+  onMarkCodexLogUserScroll: () => void
+  onSendChat: (input: string) => void | Promise<void>
+  resetKey: string
+  result: TutorResponse | null
+  streamingMessageKind: TutorMessage['kind'] | null
+  streamingTutorMessage: string
+}>(function CodexPanel({
+  codexLogRef,
+  codexStatus,
+  isGrading,
+  messages,
+  onCodexLogScroll,
+  onMarkCodexLogUserScroll,
+  onSendChat,
+  resetKey,
+  result,
+  streamingMessageKind,
+  streamingTutorMessage,
+}, ref) {
+  const pendingMessage: TutorMessage | null = isGrading
+    ? {
+        role: 'tutor',
+        content: streamingTutorMessage,
+        kind: streamingMessageKind ?? 'pending',
+      }
+    : null
+
+  return (
+    <aside className={`codex-panel ${result?.isCorrect ? 'correct' : result ? 'wrong' : ''}`}>
+      <div className="codex-header">
+        <div>
+          <p className="eyebrow">Codex</p>
+          {result && <h2>{result.verdict}</h2>}
+        </div>
+        {result && <span>{Math.round(result.score * 100)}%</span>}
+      </div>
+
+      <div
+        className="codex-log"
+        ref={codexLogRef}
+        onPointerDown={onMarkCodexLogUserScroll}
+        onScroll={onCodexLogScroll}
+        onTouchMove={onMarkCodexLogUserScroll}
+        onWheel={onMarkCodexLogUserScroll}
+      >
+        {messages.map((message, index) => (
+          <ChatMessage
+            key={`${message.role}:${index}`}
+            message={message}
+            fallbackStatus={codexStatus || 'Asking Codex...'}
+          />
+        ))}
+        {pendingMessage ? (
+          <ChatMessage
+            message={pendingMessage}
+            fallbackStatus={codexStatus || 'Asking Codex...'}
+          />
+        ) : messages.length === 0 ? (
+          <div className="empty-chat">{codexStatus || 'Ask Codex about this question.'}</div>
+        ) : null}
+      </div>
+
+      <ChatComposer
+        key={resetKey}
+        ref={ref}
+        disabled={isGrading}
+        onSend={onSendChat}
+      />
+    </aside>
+  )
+}))
+
+const ChatMessage = memo(function ChatMessage({
+  message,
+  fallbackStatus,
+}: {
+  message: TutorMessage
+  fallbackStatus: string
+}) {
+  const hasSeparator =
+    message.kind === 'grading' ||
+    message.kind === 'grading-pending' ||
+    message.kind === 'learning' ||
+    message.kind === 'learning-pending'
+
+  return (
+    <div className={`chat-message ${message.role} ${message.kind ? `message-${message.kind}` : ''}`}>
+      {hasSeparator && (
+        <div className="graded-result-separator">
+          {message.kind === 'learning' || message.kind === 'learning-pending'
+            ? 'Learn from zero'
+            : 'Graded result'}
+        </div>
+      )}
+      {message.content ? (
+        <MarkdownBlock mode="chat">{message.content}</MarkdownBlock>
+      ) : (
+        fallbackStatus
+      )}
+    </div>
+  )
+})
+
+const ChatComposer = memo(forwardRef<ChatComposerHandle, {
+  disabled: boolean
+  onSend: (input: string) => void | Promise<void>
+}>(function ChatComposer({ disabled, onSend }, ref) {
+  const [chatInput, setChatInput] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useImperativeHandle(ref, () => ({
+    focus() {
+      textareaRef.current?.focus()
+    },
+  }), [])
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    autoGrowTextarea(textarea)
+  }, [chatInput])
+
+  const submit = useCallback(() => {
+    const trimmedInput = chatInput.trim()
+    if (!trimmedInput || disabled) return
+    setChatInput('')
+    void onSend(trimmedInput)
+  }, [chatInput, disabled, onSend])
+
+  return (
+    <div className="codex-compose">
+      <form
+        className="chat-row"
+        onSubmit={(event) => {
+          event.preventDefault()
+          submit()
+        }}
+      >
+        <textarea
+          ref={textareaRef}
+          value={chatInput}
+          onChange={(event) => setChatInput(event.target.value)}
+          placeholder="Ask Codex about this question..."
+          disabled={disabled}
+          rows={1}
+          onKeyDown={(event) => {
+            if (
+              event.key !== 'Enter' ||
+              event.shiftKey ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.altKey ||
+              event.nativeEvent.isComposing
+            ) {
+              return
+            }
+            event.preventDefault()
+            submit()
+          }}
+        />
+      </form>
+    </div>
+  )
+}))
+
+const QuestionPrompt = memo(function QuestionPrompt({
   question,
   answer,
   disabled,
@@ -1115,7 +1372,7 @@ function QuestionPrompt({
       )}
     </section>
   )
-}
+})
 
 function optionButtonClassName(
   isSelected: boolean,
@@ -1194,7 +1451,7 @@ function ExamMenu({
   )
 }
 
-function MarkdownBlock({
+const MarkdownBlock = memo(function MarkdownBlock({
   children,
   mode = 'question',
   className = '',
@@ -1211,70 +1468,15 @@ function MarkdownBlock({
   return (
     <div className={`markdown markdown-${mode} ${className}`.trim()}>
       <Markdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={{
-          table(props) {
-            return (
-              <div className="markdown-table-wrap">
-                <table {...props} />
-              </div>
-            )
-          },
-          code(props) {
-            const { children: codeChildren, className } = props
-            const match = /language-([\w-]+)/.exec(className || '')
-            const code = String(codeChildren).replace(/\n$/, '')
-            const rawLanguage = match?.[1]?.toLowerCase()
-            const language = rawLanguage ? codeLanguageAliases[rawLanguage] ?? rawLanguage : null
-
-            if (language === 'mermaid') return <MermaidDiagram chart={code} />
-            if (language) {
-              return (
-                <SyntaxHighlighter
-                  className="markdown-code-block"
-                  codeTagProps={{ className: 'markdown-code' }}
-                  customStyle={{
-                    margin: 0,
-                    padding: '16px',
-                    borderRadius: '6px',
-                    background: 'var(--code-bg)',
-                    fontSize: '0.95em',
-                    lineHeight: 1.55,
-                  }}
-                  language={language}
-                  PreTag="div"
-                  style={oneDark}
-                  wrapLongLines
-                >
-                  {code}
-                </SyntaxHighlighter>
-              )
-            }
-
-            return (
-              <code className={className}>
-                {codeChildren}
-              </code>
-            )
-          },
-          img(props) {
-            const { src, alt } = props
-            return (
-              <img
-                src={resolveImageSource(src)}
-                alt={alt || 'Question attachment'}
-                loading="lazy"
-              />
-            )
-          },
-        }}
+        remarkPlugins={markdownRemarkPlugins}
+        rehypePlugins={markdownRehypePlugins}
+        components={markdownComponents}
       >
         {markdown}
       </Markdown>
     </div>
   )
-}
+})
 
 function normalizeQuestionMarkup(markup: string) {
   return markup
@@ -1846,10 +2048,55 @@ function isScrolledNearBottom(element: HTMLElement) {
   )
 }
 
+function useBatchedStreamingText() {
+  const [text, setText] = useState('')
+  const pendingTextRef = useRef('')
+  const animationFrameRef = useRef<number | null>(null)
+
+  const flushPendingText = useCallback(() => {
+    animationFrameRef.current = null
+    if (!pendingTextRef.current) return
+    const nextText = pendingTextRef.current
+    pendingTextRef.current = ''
+    setText((currentText) => currentText + nextText)
+  }, [])
+
+  const append = useCallback((delta: string) => {
+    if (!delta) return
+    pendingTextRef.current += delta
+    if (animationFrameRef.current !== null) return
+    animationFrameRef.current = window.requestAnimationFrame(flushPendingText)
+  }, [flushPendingText])
+
+  const clear = useCallback(() => {
+    pendingTextRef.current = ''
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
+    }
+    setText('')
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
+  }, [])
+
+  return { text, append, clear }
+}
+
+type LocalStateOptions = {
+  persistenceDelayMs?: number
+}
+
 function useLocalState<T>(
   key: string,
   initialValue: T,
   prepareForStorage: (value: T) => T = identity,
+  options: LocalStateOptions = {},
 ) {
   const [state, setState] = useState<T>(() => {
     try {
@@ -1861,8 +2108,17 @@ function useLocalState<T>(
   })
 
   useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(prepareForStorage(state)))
-  }, [key, prepareForStorage, state])
+    const persist = () => {
+      localStorage.setItem(key, JSON.stringify(prepareForStorage(state)))
+    }
+    const delay = options.persistenceDelayMs ?? 0
+    if (delay <= 0) {
+      persist()
+      return undefined
+    }
+    const timeout = window.setTimeout(persist, delay)
+    return () => window.clearTimeout(timeout)
+  }, [key, options.persistenceDelayMs, prepareForStorage, state])
 
   return [state, setState] as const
 }

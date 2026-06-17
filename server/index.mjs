@@ -12,6 +12,8 @@ const app = express()
 const port = Number(process.env.TURBOLEARNER_API_PORT || 8787)
 const codexRequestTimeoutMs = Number(process.env.TURBOLEARNER_CODEX_REQUEST_TIMEOUT_MS || 30_000)
 const codexTurnTimeoutMs = Number(process.env.TURBOLEARNER_CODEX_TURN_TIMEOUT_MS || 90_000)
+const tutorThreadTtlMs = Number(process.env.TURBOLEARNER_TUTOR_THREAD_TTL_MS || 30 * 60 * 1000)
+const tutorThreadCleanupIntervalMs = Math.min(tutorThreadTtlMs, 5 * 60 * 1000)
 
 const tutorThreads = new Map()
 let codex
@@ -48,6 +50,8 @@ app.post('/api/explain', (req, res) => {
 
 app.listen(port, () => {
   codex = new CodexAppServer()
+  const cleanupInterval = setInterval(cleanupExpiredTutorThreads, tutorThreadCleanupIntervalMs)
+  cleanupInterval.unref?.()
   console.log(`TurboLearner Codex bridge listening on http://localhost:${port}`)
 })
 
@@ -212,8 +216,13 @@ function decodeImagePath(imagePath) {
 }
 
 async function getTutorThread(sessionId) {
+  cleanupExpiredTutorThreads()
+  const now = Date.now()
   const existing = tutorThreads.get(sessionId)
-  if (existing) return existing
+  if (existing) {
+    existing.lastUsedAt = now
+    return existing.threadId
+  }
 
   const response = await codex.request('thread/start', {
     cwd: appRoot,
@@ -223,8 +232,17 @@ async function getTutorThread(sessionId) {
     developerInstructions: tutorDeveloperInstructions(),
   })
   const threadId = response.thread.id
-  tutorThreads.set(sessionId, threadId)
+  tutorThreads.set(sessionId, { threadId, lastUsedAt: now })
   return threadId
+}
+
+function cleanupExpiredTutorThreads() {
+  const now = Date.now()
+  for (const [sessionId, record] of tutorThreads) {
+    if (now - record.lastUsedAt > tutorThreadTtlMs) {
+      tutorThreads.delete(sessionId)
+    }
+  }
 }
 
 function tutorDeveloperInstructions() {
