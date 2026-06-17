@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import Markdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -86,6 +87,7 @@ type TutorResponse = {
   explanation: string
   concepts: string[]
   nextPrompt: string
+  correctOptionIds?: string[]
 }
 
 type TutorStreamEvent =
@@ -114,6 +116,7 @@ type HistoryItem = {
 type TutorMessage = {
   role: 'learner' | 'tutor'
   content: string
+  kind?: 'chat' | 'grading' | 'learning' | 'pending' | 'grading-pending' | 'learning-pending'
 }
 
 function appendToLastTutorMessage(messages: TutorMessage[], delta: string) {
@@ -125,7 +128,36 @@ function appendToLastTutorMessage(messages: TutorMessage[], delta: string) {
   return next
 }
 
+function persistedTutorMessages(messages: TutorMessage[]) {
+  return messages.filter((message) => {
+    if (
+      message.kind === 'pending' ||
+      message.kind === 'grading-pending' ||
+      message.kind === 'learning-pending'
+    ) return false
+    return message.content.trim()
+  })
+}
+
+function identity<T>(value: T) {
+  return value
+}
+
 const progressKey = 'turbolearner.progress.v1'
+const activeSetKey = 'turbolearner.activeSet.v1'
+const activeQuestionKey = 'turbolearner.activeQuestion.v1'
+const activeAnswersKey = 'turbolearner.activeAnswers.v1'
+const activeResultKey = 'turbolearner.activeResult.v1'
+const activeAnswerKeyRevealedKey = 'turbolearner.activeAnswerKeyRevealed.v1'
+const activeRevealedCorrectOptionIdsKey = 'turbolearner.revealedCorrectOptionIds.v1'
+const activeHistoryKey = 'turbolearner.activeHistory.v1'
+const activeMessagesKey = 'turbolearner.activeMessages.v1'
+const activeTutorSessionKey = 'turbolearner.activeTutorSession.v1'
+const codexSidebarWidthKey = 'turbolearner.codexSidebarWidth.v1'
+const defaultCodexSidebarWidth = 480
+const minCodexSidebarWidth = 360
+const maxCodexSidebarWidth = 760
+const codexAutoScrollThreshold = 32
 const codeLanguageAliases: Record<string, string> = {
   js: 'javascript',
   jsx: 'jsx',
@@ -140,28 +172,84 @@ mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' 
 
 function App() {
   const [bank, setBank] = useState<QuestionBank | null>(null)
-  const [selectedSetId, setSelectedSetId] = useState<string | null>(null)
+  const [selectedSetId, setSelectedSetId] = useLocalState<string | null>(activeSetKey, null)
   const [progress, setProgress] = useLocalState<Record<string, ProgressRecord>>(progressKey, {})
-  const [history, setHistory] = useState<HistoryItem[]>([])
-  const [currentId, setCurrentId] = useState<string | null>(null)
-  const [answersByQuestion, setAnswersByQuestion] = useState<Record<string, AnswerPayload>>({})
-  const [result, setResult] = useState<TutorResponse | null>(null)
-  const [messages, setMessages] = useState<TutorMessage[]>([])
+  const [history, setHistory] = useLocalState<HistoryItem[]>(activeHistoryKey, [])
+  const [currentId, setCurrentId] = useLocalState<string | null>(activeQuestionKey, null)
+  const [answersByQuestion, setAnswersByQuestion] = useLocalState<Record<string, AnswerPayload>>(
+    activeAnswersKey,
+    {},
+  )
+  const [result, setResult] = useLocalState<TutorResponse | null>(activeResultKey, null)
+  const [isAnswerKeyRevealed, setIsAnswerKeyRevealed] = useLocalState(
+    activeAnswerKeyRevealedKey,
+    false,
+  )
+  const [revealedCorrectOptionIdsByQuestion, setRevealedCorrectOptionIdsByQuestion] =
+    useLocalState<Record<string, string[]>>(activeRevealedCorrectOptionIdsKey, {})
+  const [messages, setMessages] = useLocalState<TutorMessage[]>(
+    activeMessagesKey,
+    [],
+    persistedTutorMessages,
+  )
   const [chatInput, setChatInput] = useState('')
   const [isGrading, setIsGrading] = useState(false)
+  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false)
   const [codexStatus, setCodexStatus] = useState('')
+  const [codexSidebarWidth, setCodexSidebarWidth] = useLocalState(
+    codexSidebarWidthKey,
+    defaultCodexSidebarWidth,
+  )
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false)
   const [streamingTutorMessage, setStreamingTutorMessage] = useState('')
-  const [tutorSessionId, setTutorSessionId] = useState(() => crypto.randomUUID())
+  const [tutorSessionId, setTutorSessionId] = useLocalState(
+    activeTutorSessionKey,
+    crypto.randomUUID(),
+  )
   const [error, setError] = useState<string | null>(null)
   const recentIds = useRef<string[]>([])
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const codexLogRef = useRef<HTMLDivElement>(null)
+  const shouldFollowCodexStreamRef = useRef(true)
+  const isUserScrollingCodexRef = useRef(false)
+  const codexScrollIntentResetRef = useRef<number | null>(null)
 
   useEffect(() => {
     fetch('/questions.json')
       .then((response) => response.json())
-      .then(setBank)
+      .then((loadedBank: QuestionBank) => {
+        setBank(loadedBank)
+
+        const questionOverrideId = new URLSearchParams(window.location.search).get('question')
+        if (!questionOverrideId) return
+
+        const override = findQuestionOverride(loadedBank, questionOverrideId)
+        if (!override) {
+          setError(`Question not found: ${questionOverrideId}`)
+          return
+        }
+
+        setSelectedSetId(override.setId)
+        setCurrentId(override.unitId)
+        setAnswersByQuestion({})
+        setResult(null)
+        setMessages([])
+        setChatInput('')
+        setIsSubmittingAnswer(false)
+        setCodexStatus('')
+        setStreamingTutorMessage('')
+        setTutorSessionId(crypto.randomUUID())
+        setError(null)
+      })
       .catch((loadError) => setError(String(loadError)))
-  }, [])
+  }, [
+    setAnswersByQuestion,
+    setCurrentId,
+    setMessages,
+    setResult,
+    setSelectedSetId,
+    setTutorSessionId,
+  ])
 
   const allSets = useMemo(() => {
     const baseSets = bank?.sets ?? []
@@ -189,6 +277,46 @@ function App() {
   const last25 = history.slice(0, 25)
   const correctLast25 = last25.filter((item) => item.isCorrect).length
   const canSubmitAnswer = currentUnit ? isUnitAnswered(currentUnit, answersByQuestion) : false
+  const boundedCodexSidebarWidth = clamp(
+    codexSidebarWidth,
+    minCodexSidebarWidth,
+    maxCodexSidebarWidth,
+  )
+  const appShellStyle = {
+    '--codex-sidebar-width': `${boundedCodexSidebarWidth}px`,
+  } as CSSProperties
+
+  const scrollCodexLogToBottom = useCallback(() => {
+    const log = codexLogRef.current
+    if (!log) return
+    log.scrollTop = log.scrollHeight
+  }, [])
+
+  const followCodexStream = useCallback(() => {
+    shouldFollowCodexStreamRef.current = true
+    requestAnimationFrame(scrollCodexLogToBottom)
+  }, [scrollCodexLogToBottom])
+
+  const markCodexLogUserScroll = useCallback(() => {
+    isUserScrollingCodexRef.current = true
+    if (codexScrollIntentResetRef.current !== null) {
+      window.clearTimeout(codexScrollIntentResetRef.current)
+    }
+    codexScrollIntentResetRef.current = window.setTimeout(() => {
+      isUserScrollingCodexRef.current = false
+      codexScrollIntentResetRef.current = null
+    }, 200)
+  }, [])
+
+  const handleCodexLogScroll = useCallback(() => {
+    const log = codexLogRef.current
+    if (!log) return
+    if (!isUserScrollingCodexRef.current) {
+      if (isScrolledNearBottom(log)) shouldFollowCodexStreamRef.current = true
+      return
+    }
+    shouldFollowCodexStreamRef.current = isScrolledNearBottom(log)
+  }, [])
 
   useEffect(() => {
     const textarea = chatTextareaRef.current
@@ -198,16 +326,70 @@ function App() {
     textarea.style.height = `${Math.min(textarea.scrollHeight, 132)}px`
   }, [chatInput, result])
 
+  useLayoutEffect(() => {
+    if (!shouldFollowCodexStreamRef.current) return
+    scrollCodexLogToBottom()
+  }, [codexStatus, isGrading, messages, result, scrollCodexLogToBottom, streamingTutorMessage])
+
+  useEffect(() => {
+    if (!isResizingSidebar) return
+
+    function handlePointerMove(event: PointerEvent) {
+      const nextWidth = clamp(
+        window.innerWidth - event.clientX,
+        minCodexSidebarWidth,
+        Math.min(maxCodexSidebarWidth, window.innerWidth - 320),
+      )
+      setCodexSidebarWidth(nextWidth)
+    }
+
+    function stopResizing() {
+      setIsResizingSidebar(false)
+    }
+
+    document.body.classList.add('resizing-codex-sidebar')
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResizing)
+    window.addEventListener('pointercancel', stopResizing)
+
+    return () => {
+      document.body.classList.remove('resizing-codex-sidebar')
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', stopResizing)
+      window.removeEventListener('pointercancel', stopResizing)
+    }
+  }, [isResizingSidebar, setCodexSidebarWidth])
+
+  useEffect(() => {
+    return () => {
+      if (codexScrollIntentResetRef.current !== null) {
+        window.clearTimeout(codexScrollIntentResetRef.current)
+      }
+    }
+  }, [])
+
   const resetQuestionState = useCallback(() => {
+    followCodexStream()
     setAnswersByQuestion({})
     setResult(null)
+    setIsAnswerKeyRevealed(false)
+    setRevealedCorrectOptionIdsByQuestion({})
     setMessages([])
     setChatInput('')
+    setIsSubmittingAnswer(false)
     setCodexStatus('')
     setStreamingTutorMessage('')
     setTutorSessionId(crypto.randomUUID())
     setError(null)
-  }, [])
+  }, [
+    followCodexStream,
+    setAnswersByQuestion,
+    setIsAnswerKeyRevealed,
+    setRevealedCorrectOptionIdsByQuestion,
+    setMessages,
+    setResult,
+    setTutorSessionId,
+  ])
 
   const showNextQuestion = useCallback((pool = units, records = progress) => {
     if (pool.length === 0) return
@@ -215,7 +397,7 @@ function App() {
     recentIds.current = [next.id, ...recentIds.current.filter((id) => id !== next.id)].slice(0, 7)
     setCurrentId(next.id)
     resetQuestionState()
-  }, [progress, resetQuestionState, units])
+  }, [progress, resetQuestionState, setCurrentId, units])
 
   function startSet(setId: string) {
     setSelectedSetId(setId)
@@ -280,7 +462,7 @@ function App() {
       },
       ...items,
     ])
-  }, [progress, setProgress])
+  }, [progress, setHistory, setProgress])
 
   const submitAnswer = useCallback(async () => {
     if (!currentUnit || isGrading) return
@@ -288,11 +470,13 @@ function App() {
     if (!isUnitAnswered(currentUnit, answersByQuestion)) return
 
     setIsGrading(true)
+    setIsSubmittingAnswer(true)
+    followCodexStream()
     setCodexStatus('Asking Codex...')
     setStreamingTutorMessage('')
     setError(null)
-    const previousMessages = messages
-    setMessages([...previousMessages, { role: 'tutor', content: '' }])
+    const previousMessages = persistedTutorMessages(messages)
+    setMessages([...previousMessages, { role: 'tutor', content: '', kind: 'grading-pending' }])
     try {
       const tutorResponse = await postTutorStream(
         '/api/explain',
@@ -310,24 +494,181 @@ function App() {
           },
         },
       )
+      const responseCorrectOptionIds = getResponseCorrectOptionIds(currentUnit, tutorResponse)
+      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
+        currentUnit,
+        revealedCorrectOptionIdsByQuestion,
+        responseCorrectOptionIds,
+      )
+      if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
+        setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
+      }
       setResult(tutorResponse)
-      setMessages([...previousMessages, { role: 'tutor', content: tutorResponse.explanation }])
+      setIsAnswerKeyRevealed(true)
+      setMessages([
+        ...previousMessages,
+        { role: 'tutor', content: tutorResponse.explanation, kind: 'grading' },
+      ])
       recordAnswer(currentUnit, tutorResponse)
     } catch (submitError) {
       setMessages(previousMessages)
       setError(String(submitError))
     } finally {
       setIsGrading(false)
+      setIsSubmittingAnswer(false)
       setCodexStatus('')
       setStreamingTutorMessage('')
     }
-  }, [answersByQuestion, currentUnit, isGrading, messages, recordAnswer, tutorSessionId])
+  }, [
+    answersByQuestion,
+    currentUnit,
+    followCodexStream,
+    isGrading,
+    messages,
+    recordAnswer,
+    setIsAnswerKeyRevealed,
+    setMessages,
+    setRevealedCorrectOptionIdsByQuestion,
+    setResult,
+    tutorSessionId,
+    revealedCorrectOptionIdsByQuestion,
+  ])
 
   useEffect(() => {
-    if (selectedSetId && units.length > 0 && !currentUnit) {
-      showNextQuestion(units, progress)
+    if (!currentUnit || !isAnswerKeyRevealed) return
+
+    const latestAnswerMessage = [...messages]
+      .reverse()
+      .find((message) =>
+        message.role === 'tutor' &&
+        (message.kind === 'learning' || message.kind === 'grading') &&
+        message.content.trim()
+      )
+    if (!latestAnswerMessage) return
+
+    const inferredCorrectOptionIds = getResponseCorrectOptionIds(currentUnit, {
+      isCorrect: false,
+      score: 0,
+      verdict: '',
+      explanation: latestAnswerMessage.content,
+      concepts: [],
+      nextPrompt: '',
+    })
+    if (!inferredCorrectOptionIds?.length) return
+
+    const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
+      currentUnit,
+      revealedCorrectOptionIdsByQuestion,
+      inferredCorrectOptionIds,
+    )
+    if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
+      setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
     }
-  }, [currentUnit, progress, selectedSetId, showNextQuestion, units])
+
+    if (result?.verdict !== 'Learning mode') return
+    const nextAnswers = applyResponseCorrectOptionIds(
+      currentUnit,
+      answersByQuestion,
+      inferredCorrectOptionIds,
+    )
+    if (nextAnswers !== answersByQuestion) setAnswersByQuestion(nextAnswers)
+  }, [
+    answersByQuestion,
+    currentUnit,
+    isAnswerKeyRevealed,
+    messages,
+    result?.verdict,
+    revealedCorrectOptionIdsByQuestion,
+    setAnswersByQuestion,
+    setRevealedCorrectOptionIdsByQuestion,
+  ])
+
+  const explainFromZero = useCallback(async () => {
+    if (!currentUnit || isGrading) return
+
+    const revealedAnswers = buildCorrectAnswerPayload(currentUnit, answersByQuestion)
+    const learningResult: TutorResponse = {
+      isCorrect: false,
+      score: 0,
+      verdict: 'Learning mode',
+      explanation: '',
+      concepts: currentUnit.concepts,
+      nextPrompt: 'Try explaining the concept back in your own words.',
+    }
+
+    setAnswersByQuestion(revealedAnswers)
+    setResult(learningResult)
+    recordAnswer(currentUnit, learningResult)
+    setIsGrading(true)
+    setIsAnswerKeyRevealed(true)
+    followCodexStream()
+    setCodexStatus('Building explanation...')
+    setStreamingTutorMessage('')
+    setError(null)
+    const previousMessages = persistedTutorMessages(messages)
+    setMessages([
+      ...previousMessages,
+      { role: 'tutor', content: '', kind: 'learning-pending' },
+    ])
+    try {
+      const tutorResponse = await postTutorStream(
+        '/api/explain',
+        {
+          sessionId: tutorSessionId,
+          mode: 'learn',
+          question: buildTutorQuestion(currentUnit),
+          answer: buildAnswerPayload(currentUnit, revealedAnswers),
+          messages,
+        },
+        {
+          onStatus: setCodexStatus,
+          onDelta: (delta) => {
+            setMessages((existing) => appendToLastTutorMessage(existing, delta))
+          },
+        },
+      )
+      const responseCorrectOptionIds = getResponseCorrectOptionIds(currentUnit, tutorResponse)
+      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
+        currentUnit,
+        revealedCorrectOptionIdsByQuestion,
+        responseCorrectOptionIds,
+      )
+      if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
+        setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
+      }
+      const nextAnswers = applyResponseCorrectOptionIds(
+        currentUnit,
+        revealedAnswers,
+        responseCorrectOptionIds,
+      )
+      if (nextAnswers !== revealedAnswers) setAnswersByQuestion(nextAnswers)
+      setMessages([
+        ...previousMessages,
+        { role: 'tutor', content: tutorResponse.explanation, kind: 'learning' },
+      ])
+    } catch (learnError) {
+      setMessages(previousMessages)
+      setError(String(learnError))
+    } finally {
+      setIsGrading(false)
+      setCodexStatus('')
+      setStreamingTutorMessage('')
+    }
+  }, [
+    answersByQuestion,
+    currentUnit,
+    followCodexStream,
+    isGrading,
+    messages,
+    recordAnswer,
+    setAnswersByQuestion,
+    setIsAnswerKeyRevealed,
+    setMessages,
+    setRevealedCorrectOptionIdsByQuestion,
+    setResult,
+    tutorSessionId,
+    revealedCorrectOptionIdsByQuestion,
+  ])
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -365,15 +706,19 @@ function App() {
   async function sendChat() {
     if (!currentUnit || !chatInput.trim() || isGrading) return
     const nextMessages: TutorMessage[] = [
-      ...messages,
+      ...persistedTutorMessages(messages),
       { role: 'learner', content: chatInput.trim() },
     ]
+    followCodexStream()
     setMessages(nextMessages)
     setChatInput('')
     setIsGrading(true)
     setCodexStatus('Asking Codex...')
     try {
-      const pendingMessages: TutorMessage[] = [...nextMessages, { role: 'tutor', content: '' }]
+      const pendingMessages: TutorMessage[] = [
+        ...nextMessages,
+        { role: 'tutor', content: '', kind: 'pending' },
+      ]
       setMessages(pendingMessages)
       const tutorResponse = await postTutorStream(
         '/api/explain',
@@ -429,7 +774,10 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell ${isResizingSidebar ? 'resizing-sidebar' : ''}`}
+      style={appShellStyle}
+    >
       <section className="trainer-panel">
         <header className="study-header">
           <div className="study-title">
@@ -443,7 +791,6 @@ function App() {
           <div className="study-metrics">
             <Stat label="Last 25" value={`${correctLast25}/${Math.max(25, last25.length || 25)}`} />
             <Stat label="Seen" value={String(Object.keys(progress).length)} />
-            <Stat label="Mode" value="Infinite" />
           </div>
           <div className="history-strip" aria-label="Last 25 answers">
             {Array.from({ length: 25 }).map((_, index) => {
@@ -474,7 +821,9 @@ function App() {
                   key={question.id}
                   question={question}
                   answer={answersByQuestion[question.id] ?? {}}
-                  disabled={Boolean(result)}
+                  disabled={Boolean(result) || isAnswerKeyRevealed}
+                  showAnswerKey={Boolean(result) || isAnswerKeyRevealed}
+                  revealedCorrectOptionIds={revealedCorrectOptionIdsByQuestion[question.id] ?? []}
                   showHeading={currentUnit.questions.length > 1}
                   onToggleOption={toggleOption}
                   onOpenAnswerChange={updateOpenAnswer}
@@ -484,13 +833,14 @@ function App() {
           </article>
         </div>
 
-        {!isGrading && (
+        {!isSubmittingAnswer && (
           <div className="action-row">
             {result ? (
               <button
                 className="primary-button"
                 type="button"
                 onClick={() => showNextQuestion()}
+                disabled={isGrading}
                 aria-keyshortcuts="Meta+Enter"
                 title="Command+Enter"
               >
@@ -502,15 +852,30 @@ function App() {
                   className="primary-button"
                   type="button"
                   onClick={submitAnswer}
-                  disabled={!canSubmitAnswer}
+                  disabled={!canSubmitAnswer || isGrading}
                   aria-keyshortcuts="Meta+Enter"
                   title="Command+Enter"
                 >
                   Submit answer
                 </button>
-                <button className="secondary-button" type="button" onClick={() => showNextQuestion()}>
-                  Skip / next
-                </button>
+                <div className="secondary-actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={explainFromZero}
+                    disabled={isGrading}
+                  >
+                    I don&apos;t know
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => showNextQuestion()}
+                    disabled={isGrading}
+                  >
+                    Skip / next
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -518,6 +883,43 @@ function App() {
 
         {error && <div className="error-box">{error}</div>}
       </section>
+
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-label="Resize Codex sidebar. Double click to reset width."
+        aria-orientation="vertical"
+        aria-valuemin={minCodexSidebarWidth}
+        aria-valuemax={maxCodexSidebarWidth}
+        aria-valuenow={boundedCodexSidebarWidth}
+        tabIndex={0}
+        title="Drag to resize. Double click to reset."
+        onDoubleClick={(event) => {
+          event.preventDefault()
+          setIsResizingSidebar(false)
+          setCodexSidebarWidth(defaultCodexSidebarWidth)
+        }}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => {
+          if (event.button !== 0) return
+          if (event.detail > 1) return
+          event.preventDefault()
+          setIsResizingSidebar(true)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Home' || event.key === 'Escape') {
+            event.preventDefault()
+            setCodexSidebarWidth(defaultCodexSidebarWidth)
+            return
+          }
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+          event.preventDefault()
+          const direction = event.key === 'ArrowLeft' ? 1 : -1
+          const step = event.shiftKey ? 48 : 16
+          setCodexSidebarWidth((width) =>
+            clamp(width + direction * step, minCodexSidebarWidth, maxCodexSidebarWidth),
+          )
+        }}
+      />
 
       <aside className={`codex-panel ${result?.isCorrect ? 'correct' : result ? 'wrong' : ''}`}>
         <div className="codex-header">
@@ -528,12 +930,36 @@ function App() {
           {result && <span>{Math.round(result.score * 100)}%</span>}
         </div>
 
-        <div className="codex-log">
+        <div
+          className="codex-log"
+          ref={codexLogRef}
+          onPointerDown={markCodexLogUserScroll}
+          onScroll={handleCodexLogScroll}
+          onTouchMove={markCodexLogUserScroll}
+          onWheel={markCodexLogUserScroll}
+        >
           {messages.map((message, index) => (
-            <div key={index} className={`chat-message ${message.role}`}>
+            <div
+              key={index}
+              className={`chat-message ${message.role} ${message.kind ? `message-${message.kind}` : ''}`}
+            >
+              {(message.kind === 'grading' ||
+                message.kind === 'grading-pending' ||
+                message.kind === 'learning' ||
+                message.kind === 'learning-pending') && (
+                <div className="graded-result-separator">
+                  {message.kind === 'learning' || message.kind === 'learning-pending'
+                    ? 'Learn from zero'
+                    : 'Graded result'}
+                </div>
+              )}
               {message.content ? (
                 <MarkdownBlock mode="chat">{message.content}</MarkdownBlock>
-              ) : isGrading && message.role === 'tutor' ? (
+              ) : isGrading && (
+                message.kind === 'pending' ||
+                message.kind === 'grading-pending' ||
+                message.kind === 'learning-pending'
+              ) ? (
                 codexStatus || 'Asking Codex...'
               ) : null}
             </div>
@@ -589,6 +1015,8 @@ function QuestionPrompt({
   question,
   answer,
   disabled,
+  showAnswerKey,
+  revealedCorrectOptionIds,
   showHeading,
   onToggleOption,
   onOpenAnswerChange,
@@ -596,11 +1024,16 @@ function QuestionPrompt({
   question: Question
   answer: AnswerPayload
   disabled: boolean
+  showAnswerKey: boolean
+  revealedCorrectOptionIds: string[]
   showHeading: boolean
   onToggleOption: (question: Question, optionId: string) => void
   onOpenAnswerChange: (questionId: string, text: string) => void
 }) {
   const selectedOptionIds = answer.selectedOptionIds ?? []
+  const correctOptionIds = revealedCorrectOptionIds.length > 0
+    ? revealedCorrectOptionIds
+    : getCorrectOptionIds(question)
 
   return (
     <section className="subquestion">
@@ -621,27 +1054,39 @@ function QuestionPrompt({
         />
       ) : (
         <div className="options-grid">
-          {question.options.map((option) => (
-            <label
-              key={option.id}
-              className={`option-button ${
-                selectedOptionIds.includes(option.id) ? 'selected' : ''
-              }`}
-            >
-              <input
-                type={question.type === 'single' ? 'radio' : 'checkbox'}
-                name={question.id}
-                checked={selectedOptionIds.includes(option.id)}
-                onChange={() => onToggleOption(question, option.id)}
-                disabled={disabled}
-              />
-              <MarkdownBlock className="option-prose">{option.text}</MarkdownBlock>
-            </label>
-          ))}
+          {question.options.map((option) => {
+            const isSelected = selectedOptionIds.includes(option.id)
+            const isCorrect = showAnswerKey && correctOptionIds.includes(option.id)
+            const isIncorrect = showAnswerKey && isSelected && !correctOptionIds.includes(option.id)
+            return (
+              <label
+                key={option.id}
+                className={optionButtonClassName(isSelected || isCorrect, isCorrect, isIncorrect)}
+              >
+                  <input
+                    type={question.type === 'single' ? 'radio' : 'checkbox'}
+                    name={question.id}
+                    checked={isSelected}
+                    onChange={() => onToggleOption(question, option.id)}
+                    disabled={disabled}
+                  />
+                <MarkdownBlock className="option-prose">{option.text}</MarkdownBlock>
+              </label>
+            )
+          })}
         </div>
       )}
     </section>
   )
+}
+
+function optionButtonClassName(isSelected: boolean, isCorrect: boolean, isIncorrect: boolean) {
+  return [
+    'option-button',
+    isSelected ? 'selected' : '',
+    isCorrect ? 'correct-answer' : '',
+    isIncorrect ? 'incorrect-answer' : '',
+  ].filter(Boolean).join(' ')
 }
 
 function ExamMenu({
@@ -691,6 +1136,13 @@ function MarkdownBlock({
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          table(props) {
+            return (
+              <div className="markdown-table-wrap">
+                <table {...props} />
+              </div>
+            )
+          },
           code(props) {
             const { children: codeChildren, className } = props
             const match = /language-([\w-]+)/.exec(className || '')
@@ -705,7 +1157,7 @@ function MarkdownBlock({
                   className="markdown-code-block"
                   codeTagProps={{ className: 'markdown-code' }}
                   customStyle={{
-                    margin: '0 0 14px',
+                    margin: 0,
                     padding: '16px',
                     borderRadius: '6px',
                     background: 'var(--code-bg)',
@@ -713,7 +1165,7 @@ function MarkdownBlock({
                     lineHeight: 1.55,
                   }}
                   language={language}
-                  PreTag="pre"
+                  PreTag="div"
                   style={oneDark}
                   wrapLongLines
                 >
@@ -936,6 +1388,97 @@ function normalizeAnswer(question: Question, answer: AnswerPayload = {}) {
   return { selectedOptionIds: answer.selectedOptionIds ?? [] }
 }
 
+function buildCorrectAnswerPayload(
+  unit: QuestionUnit,
+  existingAnswers: Record<string, AnswerPayload>,
+) {
+  return unit.questions.reduce<Record<string, AnswerPayload>>((answers, question) => {
+    if (question.type === 'open') {
+      answers[question.id] = existingAnswers[question.id] ?? { text: '' }
+      return answers
+    }
+
+    const correctOptionIds = getCorrectOptionIds(question)
+    answers[question.id] = {
+      selectedOptionIds: correctOptionIds.length > 0
+        ? correctOptionIds
+        : existingAnswers[question.id]?.selectedOptionIds ?? [],
+    }
+    return answers
+  }, { ...existingAnswers })
+}
+
+function applyResponseCorrectOptionIds(
+  unit: QuestionUnit,
+  existingAnswers: Record<string, AnswerPayload>,
+  correctOptionIds: string[] | undefined,
+) {
+  if (!correctOptionIds?.length) return existingAnswers
+  const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
+  if (choiceQuestions.length !== 1) return existingAnswers
+
+  return {
+    ...existingAnswers,
+    [choiceQuestions[0].id]: { selectedOptionIds: correctOptionIds },
+  }
+}
+
+function getResponseCorrectOptionIds(unit: QuestionUnit, response: TutorResponse) {
+  if (response.correctOptionIds?.length) return response.correctOptionIds
+  const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
+  if (choiceQuestions.length !== 1) return undefined
+
+  return inferCorrectOptionIdsFromText(choiceQuestions[0], response.explanation)
+}
+
+function inferCorrectOptionIdsFromText(question: Question, text: string) {
+  if (!text.trim()) return undefined
+  const optionIds = question.options.map((option) => option.id)
+  if (optionIds.length === 0) return undefined
+
+  const escapedIds = optionIds.map(escapeRegExp).join('|')
+  const answerPatterns = [
+    new RegExp(`\\bcorrect (?:choices?|answers?|options?)\\s+(?:are|is)\\s+((?:${escapedIds})(?:\\s*(?:,|and|&)\\s*(?:${escapedIds}))*)`, 'i'),
+    new RegExp(`\\bchoose\\s+((?:${escapedIds})(?:\\s*(?:,|and|&)\\s*(?:${escapedIds}))*)`, 'i'),
+  ]
+
+  for (const pattern of answerPatterns) {
+    const match = text.match(pattern)
+    if (!match) continue
+    const ids = match[1].match(new RegExp(`\\b(?:${escapedIds})\\b`, 'gi')) ?? []
+    const normalizedIds = ids.map((id) => optionIds.find((optionId) => optionId.toLowerCase() === id.toLowerCase()))
+      .filter((id): id is string => Boolean(id))
+    if (normalizedIds.length > 0) return uniqueStrings(normalizedIds)
+  }
+
+  return undefined
+}
+
+function buildRevealedCorrectOptionIds(
+  unit: QuestionUnit,
+  existingCorrectOptionIds: Record<string, string[]>,
+  correctOptionIds: string[] | undefined,
+) {
+  if (!correctOptionIds?.length) return existingCorrectOptionIds
+  const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
+  if (choiceQuestions.length !== 1) return existingCorrectOptionIds
+
+  return {
+    ...existingCorrectOptionIds,
+    [choiceQuestions[0].id]: correctOptionIds,
+  }
+}
+
+function getCorrectOptionIds(question: Question) {
+  if (Array.isArray(question.answer?.correctOptionIds)) return question.answer.correctOptionIds
+  if (Array.isArray(question.correctOptionIds)) return question.correctOptionIds
+  return []
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function isUnitAnswered(unit: QuestionUnit, answersByQuestion: Record<string, AnswerPayload>) {
   return unit.questions.every((question) => {
     const answer = normalizeAnswer(question, answersByQuestion[question.id])
@@ -965,8 +1508,25 @@ function chooseNextUnit(
   return weighted[Math.floor(Math.random() * weighted.length)] ?? units[0]
 }
 
+function findQuestionOverride(bank: QuestionBank, questionId: string) {
+  for (const set of bank.sets) {
+    const unit = buildQuestionUnits(set.questions).find(
+      (candidate) =>
+        candidate.id === questionId ||
+        candidate.questions.some((question) => question.id === questionId),
+    )
+    if (unit) return { setId: set.id, unitId: unit.id }
+  }
+
+  return null
+}
+
 function uniqueStrings(values: string[]) {
   return [...new Set(values)]
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
 }
 
 function updateRecord(record: ProgressRecord, isCorrect: boolean, now: number) {
@@ -1046,19 +1606,29 @@ function readStreamLines(buffer: string, onLine: (line: string) => void) {
   return rest
 }
 
-function useLocalState<T>(key: string, initialValue: T) {
+function isScrolledNearBottom(element: HTMLElement) {
+  return (
+    element.scrollHeight - element.scrollTop - element.clientHeight <= codexAutoScrollThreshold
+  )
+}
+
+function useLocalState<T>(
+  key: string,
+  initialValue: T,
+  prepareForStorage: (value: T) => T = identity,
+) {
   const [state, setState] = useState<T>(() => {
     try {
       const stored = localStorage.getItem(key)
-      return stored ? (JSON.parse(stored) as T) : initialValue
+      return stored ? prepareForStorage(JSON.parse(stored) as T) : initialValue
     } catch {
       return initialValue
     }
   })
 
   useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(state))
-  }, [key, state])
+    localStorage.setItem(key, JSON.stringify(prepareForStorage(state)))
+  }, [key, prepareForStorage, state])
 
   return [state, setState] as const
 }

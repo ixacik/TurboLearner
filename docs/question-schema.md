@@ -106,6 +106,8 @@ Generated app asset:
 <image>/generated-assets/bias-variance-wiggly-boundary.svg</image>
 ```
 
+Use images for actual visual figures: plots, decision boundaries, graphs, trees, confusion-matrix diagrams, or other spatial visuals. Do not use images for text-only prompts, code, formulas, or algorithms. Put those directly into the prompt with `<code>` and `<math>` tags.
+
 Code block:
 
 ```html

@@ -36,7 +36,7 @@
       "concepts": "optional tags used for review and generation"
     }
   },
-  "generatedAt": "2026-06-17T09:21:22.693Z",
+  "generatedAt": "2026-06-17T10:26:55.966Z",
   "sets": [
     {
       "id": "practice-exam",
@@ -281,7 +281,7 @@
           "number": "7",
           "title": "Question 7",
           "type": "single",
-          "prompt": "The figure below shows a decision boundary learned by a classifier based on two features, F1 and F2, shown on the two axes. Considering the bias and variance terms of the error, the following classifier:\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-85d11cb3-dc4b-4791-9dc1-069592f48ef1.png</image>",
+          "prompt": "The figure below shows a decision boundary learned by a classifier based on two features, F1 and F2, shown on the two axes. Considering the bias and variance terms of the error, the following classifier:\n\n<image>/generated-assets/bias-variance-wiggly-boundary.svg</image>",
           "points": 1,
           "options": [
             {
@@ -307,7 +307,7 @@
             "source": "missing"
           },
           "imagePaths": [
-            "/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-85d11cb3-dc4b-4791-9dc1-069592f48ef1.png"
+            "/generated-assets/bias-variance-wiggly-boundary.svg"
           ],
           "concepts": [
             "metrics",
@@ -355,7 +355,7 @@
           "number": "9",
           "title": "Question 9",
           "type": "single",
-          "prompt": "Imagine the following dataset with only one numerical feature, demonstrated on the x-axis, and two class labels (-, +). Which technique can find a decision boundary that can classify this dataset perfectly?\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c200ca87-4af2-4410-b085-dda7945fd2cc.png</image>",
+          "prompt": "Imagine the following dataset with only one numerical feature, demonstrated on the x-axis, and two class labels (-, +). Which technique can find a decision boundary that can classify this dataset perfectly?\n\n<image>/generated-assets/one-dimensional-nonlinear-classes.svg</image>",
           "points": 1,
           "options": [
             {
@@ -381,9 +381,10 @@
             "source": "missing"
           },
           "imagePaths": [
-            "/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c200ca87-4af2-4410-b085-dda7945fd2cc.png"
+            "/generated-assets/one-dimensional-nonlinear-classes.svg"
           ],
           "concepts": [
+            "linear-models",
             "features"
           ]
         },
@@ -813,7 +814,7 @@
           "number": "23a",
           "title": "Question 23a",
           "type": "open",
-          "prompt": "Here is a simple perturbation-based explainer algorithm, similar to the LIME algorithm. This algorithm contains the steps to train a surrogate model <math>g</math> for a specific sample <math>x</math>. This sample comes from the initial dataset <math>X = {x_1, ..., x, ..., x_n}</math>.\n\nIn a similar fashion to the LIME algorithm, we make use of K-Lasso to train a simple linear surrogate model, and we return the weights <math>w</math> as an explanation to the input features.\n\n\nWith the function <code>sample_around</code> to generate new samples in the neighbourhood of the interpretable version <math>x'</math> of the original input <math>x</math>.\n\nIs there any issue with the proposed Algorithm 1? Explain your answer.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-4d9aab32-1435-4187-8066-bcceaed15072.png</image>",
+          "prompt": "Here is a simple perturbation-based explainer algorithm, similar to the LIME algorithm. This algorithm contains the steps to train a surrogate model <math>g</math> for a specific sample <math>x</math>. This sample comes from the initial dataset <math>X = {x_1, ..., x, ..., x_n}</math>.\n\nIn a similar fashion to the LIME algorithm, we make use of K-Lasso to train a simple linear surrogate model, and we return the weights <math>w</math> as an explanation to the input features.\n\n\n<math display>\n\\begin{aligned}\n&\\textbf{Algorithm 1: Explainer algorithm} \\\\\n&\\textbf{Require: } \\text{classifier } f,\\ \\text{samples } N,\\ \\text{instance } x,\\ \\text{interpretable } x^{\\prime} \\\\\n&\\textbf{Require: } \\text{similarity metric } \\pi_x,\\ \\text{explanation length } K \\\\\n&1:\\quad Z \\leftarrow \\emptyset \\\\\n&2:\\quad \\textbf{for } i \\in \\{1,2,\\ldots,N\\}\\ \\textbf{do} \\\\\n&3:\\quad\\quad z_i^{\\prime} \\leftarrow \\operatorname{sample\\_around}(x^{\\prime}) \\\\\n&4:\\quad\\quad Z \\leftarrow Z \\cup \\left(z_i^{\\prime}, f(z_i), \\pi_x(z_i)\\right) \\\\\n&5:\\quad \\textbf{end for} \\\\\n&6:\\quad w \\leftarrow \\operatorname{K\\text{-}Lasso}(Z,K) \\\\\n&7:\\quad \\textbf{return } w\n\\end{aligned}\n</math>\n\nWith the function <code>sample_around</code> to generate new samples in the neighbourhood of the interpretable version <math>x'</math> of the original input <math>x</math>.\n\nIs there any issue with the proposed Algorithm 1? Explain your answer.",
           "points": 1,
           "options": [],
           "answer": {
@@ -821,9 +822,7 @@
             "expectedText": null,
             "source": "missing"
           },
-          "imagePaths": [
-            "/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-4d9aab32-1435-4187-8066-bcceaed15072.png"
-          ],
+          "imagePaths": [],
           "concepts": [
             "linear-models",
             "xai",
@@ -943,6 +942,10 @@
             "source": "missing"
           },
           "imagePaths": [],
+          "groupId": "practice-exam-q25",
+          "groupTitle": "Question 25",
+          "groupPrompt": "A data scientist released his Python code on GitHub that implements the best split for decision trees. You would like to use his code in your project for developing decision trees. The code is as follows:\n\nPython code shown in practice exam.",
+          "groupOrder": 0,
           "concepts": [
             "decision-trees"
           ]
@@ -963,6 +966,10 @@
             "source": "missing"
           },
           "imagePaths": [],
+          "groupId": "practice-exam-q25",
+          "groupTitle": "Question 25",
+          "groupPrompt": "A data scientist released his Python code on GitHub that implements the best split for decision trees. You would like to use his code in your project for developing decision trees. The code is as follows:\n\nPython code shown in practice exam.",
+          "groupOrder": 1,
           "concepts": [
             "decision-trees"
           ]
@@ -1639,7 +1646,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q18",
           "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
-          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n",
           "groupOrder": 0,
           "concepts": [
             "metrics"
@@ -1663,7 +1670,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q18",
           "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
-          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n",
           "groupOrder": 1,
           "concepts": [
             "metrics"
@@ -1696,7 +1703,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q18",
           "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
-          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n",
           "groupOrder": 2,
           "concepts": [
             "metrics"
@@ -1720,7 +1727,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q18",
           "groupTitle": "Classifier Metrics Code - 1.0p Each Subquestion",
-          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-c2ccf54f-5391-435f-bfd1-5f676a3c7b80.png</image>",
+          "groupPrompt": "You would like to implement some code to evaluate your classifier, and you ask Copilot (Large-Language model) to generate some code for you. It starts by generating code for calculating recall:\n\n\n\n<code lang=\"python\">\ndef true_positives(true_labels, predicted_labels, positive_class):\n    pos_true = true_labels == positive_class\n    pos_predicted = predicted_labels == positive_class\n    match = pos_true & pos_predicted\n    return np.sum(match)\n\ndef false_positives(true_labels, predicted_labels, positive_class):\n    pos_predicted = predicted_labels == positive_class\n    neg_true = true_labels != positive_class\n    match = pos_predicted & neg_true\n    return np.sum(match)\n\ndef true_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    neg_true = true_labels != positive_class\n    match = neg_predicted & neg_true\n    return np.sum(match)\n\ndef false_negatives(true_labels, predicted_labels, positive_class):\n    neg_predicted = predicted_labels != positive_class\n    pos_true = true_labels == positive_class\n    match = neg_predicted & pos_true\n    return np.sum(match)\n\ndef recall(true_labels, predicted_labels, positive_class):\n    TP = true_positives(true_labels, predicted_labels, positive_class)\n    FP = false_positives(true_labels, predicted_labels, positive_class)\n    return TP / (TP + FP)\n</code>\n\n",
           "groupOrder": 3,
           "concepts": [
             "xai"
@@ -1765,7 +1772,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q19",
           "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
-          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.",
           "groupOrder": 0,
           "concepts": [
             "neural-networks"
@@ -1806,7 +1813,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q19",
           "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
-          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.",
           "groupOrder": 1,
           "concepts": [
             "neural-networks"
@@ -1847,7 +1854,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q19",
           "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
-          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.",
           "groupOrder": 2,
           "concepts": [
             "neural-networks"
@@ -1871,7 +1878,7 @@
           "imagePaths": [],
           "groupId": "last-year-exam-q19",
           "groupTitle": "Neural Networks For Climate Image Tasks - 1.0p Each Subquestion",
-          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.\n\n<image>/var/folders/ks/pg16vg4x4y903n3clqw_sw440000gn/T/codex-clipboard-a328bd13-0d4e-4b59-a221-552adadf79a7.png</image>",
+          "groupPrompt": "You are working towards developing a machine learning model on climate change that:\n\n- A) detects different types of forests: forest classification into boreal, tropical, rainforest, pine trees, sub-tropical, and Douglas fir forests\n- B) predicts the degree of deforestation, returning a continuous value.\n\nYou are using a dataset with satellite imaging with 10 million images. The dataset contains labels for the forest type, but also the degree of deforestation.\n\nYou have decided to pick a neural network model for analyzing the images and performing both tasks.",
           "groupOrder": 3,
           "concepts": []
         }

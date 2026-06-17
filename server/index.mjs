@@ -1,5 +1,6 @@
 import cors from 'cors'
 import express from 'express'
+import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -59,12 +60,21 @@ async function streamTutorTurn(payload, res) {
 
   const sessionId = String(payload.sessionId || payload.question?.id || 'default')
   const isFollowUp = payload.mode === 'chat'
+  const isLearningRequest = payload.mode === 'learn'
   const threadId = await getTutorThread(sessionId)
-  const prompt = isFollowUp ? buildFollowUpPrompt(payload) : buildGradingPrompt(payload)
+  const prompt = isLearningRequest
+    ? buildLearningPrompt(payload)
+    : isFollowUp
+      ? buildFollowUpPrompt(payload)
+      : buildGradingPrompt(payload)
+  const input = buildCodexInput(prompt, payload)
   let markdown = ''
   let grade = null
+  let answerKey = null
   const gradeFilter = createGradeCallFilter((nextGrade) => {
     grade = nextGrade
+  }, (nextAnswerKey) => {
+    answerKey = nextAnswerKey
   })
   let settled = false
 
@@ -76,7 +86,7 @@ async function streamTutorTurn(payload, res) {
 
   await codex.startTurn({
     threadId,
-    input: [{ type: 'text', text: prompt, text_elements: [] }],
+    input,
     cwd: appRoot,
     approvalPolicy: 'never',
     sandboxPolicy: { type: 'readOnly', networkAccess: false },
@@ -110,10 +120,93 @@ async function streamTutorTurn(payload, res) {
     markdown += finalDelta
     writeEvent(res, { type: 'delta', delta: finalDelta })
   }
-  const response = tutorResponseFromMarkdown(payload, markdown, grade)
+  const response = tutorResponseFromMarkdown(payload, markdown, grade, answerKey)
   writeEvent(res, { type: 'final', response })
   writeEvent(res, { type: 'done' })
   res.end()
+}
+
+function buildCodexInput(prompt, payload) {
+  const imageInputs = collectQuestionImageInputs(payload.question)
+  const imageNote =
+    imageInputs.length > 0
+      ? `\n\nAttached question image${imageInputs.length === 1 ? '' : 's'}: ${imageInputs.length}. Use the attached pixels when grading or answering.`
+      : ''
+
+  return [
+    { type: 'text', text: `${prompt}${imageNote}`, text_elements: [] },
+    ...imageInputs,
+  ]
+}
+
+function collectQuestionImageInputs(question) {
+  const rawPaths = new Set()
+  collectImagePaths(question, rawPaths)
+
+  return [...rawPaths]
+    .map((rawPath) => imagePathToInput(rawPath))
+    .filter(Boolean)
+}
+
+function collectImagePaths(value, rawPaths) {
+  if (!value || typeof value !== 'object') return
+
+  for (const field of ['prompt', 'groupPrompt', 'sharedPrompt']) {
+    if (typeof value[field] === 'string') {
+      for (const imagePath of extractImageTags(value[field])) rawPaths.add(imagePath)
+    }
+  }
+
+  if (Array.isArray(value.imagePaths)) {
+    for (const imagePath of value.imagePaths) {
+      if (typeof imagePath === 'string' && imagePath.trim()) rawPaths.add(imagePath.trim())
+    }
+  }
+
+  if (Array.isArray(value.questions)) {
+    for (const question of value.questions) collectImagePaths(question, rawPaths)
+  }
+}
+
+function extractImageTags(markup) {
+  const paths = []
+  markup.replace(/<image>([\s\S]*?)<\/image>/gi, (_, rawPath) => {
+    const imagePath = String(rawPath).trim()
+    if (imagePath) paths.push(imagePath)
+    return ''
+  })
+  return paths
+}
+
+function imagePathToInput(rawPath) {
+  const imagePath = decodeImagePath(rawPath)
+  if (/^https?:\/\//i.test(imagePath) || /^data:image\//i.test(imagePath)) {
+    return { type: 'image', url: imagePath, detail: 'high' }
+  }
+
+  const localPath = resolveLocalImagePath(imagePath)
+  if (!localPath || !fs.existsSync(localPath)) return null
+
+  return { type: 'localImage', path: localPath, detail: 'high' }
+}
+
+function resolveLocalImagePath(imagePath) {
+  if (path.isAbsolute(imagePath)) return imagePath
+  if (/^\/generated-assets\//i.test(imagePath)) {
+    return path.join(appRoot, 'public', imagePath)
+  }
+  if (/^generated-assets\//i.test(imagePath)) {
+    return path.join(appRoot, 'public', imagePath)
+  }
+  return null
+}
+
+function decodeImagePath(imagePath) {
+  try {
+    return decodeURI(imagePath)
+  } catch {
+    return imagePath
+  }
 }
 
 async function getTutorThread(sessionId) {
@@ -140,13 +233,21 @@ Do not edit files, run commands, or browse. Stay in teaching mode.
 
 Write in natural GitHub-flavored Markdown. Be direct, but teach the idea.
 You can organize the response however it flows best for the learner.
+Use LaTeX for mathematical notation: inline math as $...$ and display math as $$...$$.
+Do not put formulas, symbolic expressions, variable definitions, or short algorithmic steps in
+fenced code blocks unless they are actual source code in a programming language. For pseudocode,
+prefer normal prose lists with inline math.
 
 The TurboLearner bridge exposes one state tool named grade. For submitted answers only,
 finish your response with a final line in this exact form:
 grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Short follow-up question"})
 
+For multiple-choice questions when you know the correct option id or ids, include a final hidden
+answer key line immediately before grade, or as the final line when grade is not used:
+answerKey({"correctOptionIds":["A","B"]})
+
 Use score as a decimal from 0 to 1. Use isCorrect=true when the answer is substantially correct.
-The grade line is a tool call for the app, not learner-facing prose.
+The grade and answerKey lines are tool calls for the app, not learner-facing prose.
 
 For follow-up chat, answer the learner's question in Markdown and keep using the same tutoring style. If the learner asks for the answer, give it and explain why.
 `.trim()
@@ -159,6 +260,9 @@ Grade this learner answer and teach the concept.
 Question:
 ${JSON.stringify(payload.question, null, 2)}
 
+Conversation so far:
+${formatConversation(payload.messages)}
+
 Learner answer:
 ${JSON.stringify(payload.answer, null, 2)}
 
@@ -168,6 +272,8 @@ Rules:
 - Prefer question.answer.correctOptionIds or question.answer.expectedText when present. If those are missing, use legacy question.correctOptionIds if present.
 - If no official answer is present, infer the answer from the concept and say that you inferred it.
 - Do not only tell the learner whether they are correct. Give the correct answer, explain the concept, and connect related concepts.
+- Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
+- For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with the correct option ids.
 `.trim()
 }
 
@@ -187,12 +293,57 @@ ${JSON.stringify(currentQuestion, null, 2)}
 Their current or submitted answer:
 ${JSON.stringify(payload.answer, null, 2)}
 
+Conversation so far:
+${formatConversation(payload.messages)}
+
 Follow-up question:
 ${JSON.stringify(latestUserMessage?.content ?? '', null, 2)}
 
 Answer conversationally in Markdown. Do not call grade for ordinary follow-up chat.
+Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
 ${isPreSubmit ? preSubmitHintRules() : postSubmitChatRules()}
 `.trim()
+}
+
+function buildLearningPrompt(payload) {
+  return `
+The learner chose "I don't know" for this question. This is a learning request, not a graded attempt.
+
+Current question:
+${JSON.stringify(payload.question, null, 2)}
+
+Learner's current partial answer, if any:
+${JSON.stringify(payload.answer, null, 2)}
+
+Conversation so far:
+${formatConversation(payload.messages)}
+
+Teach the entire concept from zero.
+
+Rules:
+- Start from intuition and plain language before formal definitions.
+- Give the correct answer and explain why it is correct.
+- Explain why the tempting wrong answers or wrong approaches are wrong when options are available.
+- Connect the idea to related machine-learning concepts, terminology, and exam patterns.
+- Include a compact worked example or analogy when it helps.
+- End with a short checklist the learner can use to recognize this concept next time.
+- Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
+- For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with the correct option ids as the final line.
+- Do not call grade.
+`.trim()
+}
+
+function formatConversation(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return '(none)'
+
+  return messages
+    .slice(-12)
+    .map((message) => {
+      const role = message?.role === 'learner' ? 'Learner' : 'Tutor'
+      const content = typeof message?.content === 'string' ? message.content.trim() : ''
+      return `${role}: ${content || '(empty)'}`
+    })
+    .join('\n\n')
 }
 
 function preSubmitHintRules() {
@@ -222,7 +373,7 @@ function questionWithoutAnswerKey(question) {
   }
 }
 
-function tutorResponseFromMarkdown(payload, markdown, grade = null) {
+function tutorResponseFromMarkdown(payload, markdown, grade = null, answerKey = null) {
   const score = grade ? clamp(Number(grade.score), 0, 1) : extractScore(markdown)
   const verdict = grade?.verdict || extractLabel(markdown, 'Verdict') || firstTextLine(markdown) || 'Codex response.'
   const nextPrompt =
@@ -240,10 +391,11 @@ function tutorResponseFromMarkdown(payload, markdown, grade = null) {
       ...((payload.question?.questions ?? []).flatMap((question) => question.concepts ?? [])),
     ]),
     nextPrompt: stripMarkdown(nextPrompt).trim(),
+    correctOptionIds: answerKey?.correctOptionIds ?? undefined,
   }
 }
 
-function createGradeCallFilter(onGrade) {
+function createGradeCallFilter(onGrade, onAnswerKey) {
   let pending = ''
 
   return {
@@ -261,29 +413,45 @@ function createGradeCallFilter(onGrade) {
         const lineWithBreak = pending.slice(0, breakEnd)
         pending = pending.slice(breakEnd)
 
-        const grade = parseGradeToolCall(line)
-        if (grade) onGrade(grade)
+        const toolCall = parseHiddenToolCall(line)
+        if (toolCall?.type === 'grade') onGrade(toolCall.value)
+        else if (toolCall?.type === 'answerKey') onAnswerKey(toolCall.value)
         else visible += lineWithBreak
       }
 
       return visible
     },
     flush() {
-      const grade = parseGradeToolCall(pending)
-      const visible = grade ? '' : pending
-      if (grade) onGrade(grade)
+      const toolCall = parseHiddenToolCall(pending)
+      const visible = toolCall ? '' : pending
+      if (toolCall?.type === 'grade') onGrade(toolCall.value)
+      else if (toolCall?.type === 'answerKey') onAnswerKey(toolCall.value)
       pending = ''
       return visible
     },
   }
 }
 
-function parseGradeToolCall(line) {
-  const match = line.trim().match(/^grade\((\{[\s\S]*\})\)$/i)
-  if (!match) return null
+function parseHiddenToolCall(line) {
+  const trimmed = line.trim()
+  const gradeMatch = trimmed.match(/^grade\((\{[\s\S]*\})\)$/i)
+  if (gradeMatch) {
+    const grade = parseGradeToolCallJson(gradeMatch[1])
+    return grade ? { type: 'grade', value: grade } : null
+  }
 
+  const answerKeyMatch = trimmed.match(/^answerKey\((\{[\s\S]*\})\)$/i)
+  if (answerKeyMatch) {
+    const answerKey = parseAnswerKeyToolCallJson(answerKeyMatch[1])
+    return answerKey ? { type: 'answerKey', value: answerKey } : null
+  }
+
+  return null
+}
+
+function parseGradeToolCallJson(json) {
   try {
-    const grade = JSON.parse(match[1])
+    const grade = JSON.parse(json)
     return {
       isCorrect: Boolean(grade.isCorrect),
       score: clamp(Number(grade.score), 0, 1),
@@ -295,8 +463,30 @@ function parseGradeToolCall(line) {
   }
 }
 
+function parseAnswerKeyToolCallJson(json) {
+  try {
+    const answerKey = JSON.parse(json)
+    const correctOptionIds = Array.isArray(answerKey.correctOptionIds)
+      ? answerKey.correctOptionIds.filter((id) => typeof id === 'string' && id.trim())
+      : []
+    return correctOptionIds.length > 0 ? { correctOptionIds } : null
+  } catch {
+    return null
+  }
+}
+
+function parseGradeToolCall(line) {
+  const match = line.trim().match(/^grade\((\{[\s\S]*\})\)$/i)
+  if (!match) return null
+
+  return parseGradeToolCallJson(match[1])
+}
+
 function stripGradeToolCall(markdown) {
-  return markdown.replace(/(?:^|\n)\s*grade\(\{[\s\S]*?\}\)\s*$/i, '').trim()
+  return markdown
+    .replace(/(?:^|\n)\s*answerKey\(\{[\s\S]*?\}\)\s*$/i, '')
+    .replace(/(?:^|\n)\s*grade\(\{[\s\S]*?\}\)\s*$/i, '')
+    .trim()
 }
 
 function extractScore(markdown) {

@@ -9,6 +9,7 @@
     "dev:server": "nodemon server/index.mjs",
     "generate:assets": "node scripts/generateQuestionAssets.mjs",
     "import:questions": "node scripts/importQuestions.mjs",
+    "audit:questions": "node scripts/auditQuestionBank.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
