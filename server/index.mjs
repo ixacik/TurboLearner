@@ -241,10 +241,14 @@ prefer normal prose lists with inline math.
 The TurboLearner bridge exposes one state tool named grade. For submitted answers only,
 finish your response with a final line in this exact form:
 grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Short follow-up question"})
+For grouped questions, include child question scores when possible:
+grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Short follow-up question","questionScores":{"question-id":1},"questionCorrectness":{"question-id":true}})
 
 For multiple-choice questions when you know the correct option id or ids, include a final hidden
 answer key line immediately before grade, or as the final line when grade is not used:
 answerKey({"correctOptionIds":["A","B"]})
+For grouped questions, key answers by child question id:
+answerKey({"correctOptionIdsByQuestion":{"question-id-1":["B"],"question-id-2":["A","C"]}})
 
 Use score as a decimal from 0 to 1. Use isCorrect=true when the answer is substantially correct.
 The grade and answerKey lines are tool calls for the app, not learner-facing prose.
@@ -268,12 +272,14 @@ ${JSON.stringify(payload.answer, null, 2)}
 
 Rules:
 - If question.type is "group", grade every child in question.questions against the matching entry in answer.subAnswers, then give one overall score. Mention each subquestion briefly.
+- For grouped questions, include questionScores and questionCorrectness in the hidden grade line keyed by child question id.
 - For multiple-choice questions, compare selected option ids/text against the correct answer if present.
 - Prefer question.answer.correctOptionIds or question.answer.expectedText when present. If those are missing, use legacy question.correctOptionIds if present.
 - If no official answer is present, infer the answer from the concept and say that you inferred it.
 - Do not only tell the learner whether they are correct. Give the correct answer, explain the concept, and connect related concepts.
 - Use LaTeX math delimiters for formulas and symbolic notation. Avoid fenced code blocks unless showing real executable code.
 - For multiple-choice questions, include answerKey({"correctOptionIds":[...]}) with the correct option ids.
+- For grouped multiple-choice questions, include answerKey({"correctOptionIdsByQuestion":{...}}) keyed by child question id.
 `.trim()
 }
 
@@ -392,6 +398,9 @@ function tutorResponseFromMarkdown(payload, markdown, grade = null, answerKey = 
     ]),
     nextPrompt: stripMarkdown(nextPrompt).trim(),
     correctOptionIds: answerKey?.correctOptionIds ?? undefined,
+    correctOptionIdsByQuestion: answerKey?.correctOptionIdsByQuestion ?? undefined,
+    questionScores: grade?.questionScores ?? undefined,
+    questionCorrectness: grade?.questionCorrectness ?? undefined,
   }
 }
 
@@ -452,15 +461,39 @@ function parseHiddenToolCall(line) {
 function parseGradeToolCallJson(json) {
   try {
     const grade = JSON.parse(json)
+    const questionScores = parseQuestionScores(grade.questionScores)
+    const questionCorrectness = parseQuestionCorrectness(grade.questionCorrectness)
     return {
       isCorrect: Boolean(grade.isCorrect),
       score: clamp(Number(grade.score), 0, 1),
       verdict: typeof grade.verdict === 'string' ? grade.verdict : '',
       nextPrompt: typeof grade.nextPrompt === 'string' ? grade.nextPrompt : '',
+      ...(Object.keys(questionScores).length > 0 ? { questionScores } : {}),
+      ...(Object.keys(questionCorrectness).length > 0 ? { questionCorrectness } : {}),
     }
   } catch {
     return null
   }
+}
+
+function parseQuestionScores(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([questionId, score]) => [questionId, Number(score)])
+      .filter(([questionId, score]) => typeof questionId === 'string' && questionId.trim() && Number.isFinite(score))
+      .map(([questionId, score]) => [questionId, clamp(score, 0, 1)])
+  )
+}
+
+function parseQuestionCorrectness(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([questionId, isCorrect]) => typeof questionId === 'string' && questionId.trim() && typeof isCorrect === 'boolean'),
+  )
 }
 
 function parseAnswerKeyToolCallJson(json) {
@@ -469,7 +502,30 @@ function parseAnswerKeyToolCallJson(json) {
     const correctOptionIds = Array.isArray(answerKey.correctOptionIds)
       ? answerKey.correctOptionIds.filter((id) => typeof id === 'string' && id.trim())
       : []
-    return correctOptionIds.length > 0 ? { correctOptionIds } : null
+    const correctOptionIdsByQuestion =
+      answerKey.correctOptionIdsByQuestion &&
+      typeof answerKey.correctOptionIdsByQuestion === 'object' &&
+      !Array.isArray(answerKey.correctOptionIdsByQuestion)
+        ? Object.fromEntries(
+            Object.entries(answerKey.correctOptionIdsByQuestion)
+              .map(([questionId, ids]) => [
+                questionId,
+                Array.isArray(ids)
+                  ? ids.filter((id) => typeof id === 'string' && id.trim())
+                  : [],
+              ])
+              .filter(([, ids]) => ids.length > 0),
+          )
+        : {}
+    if (correctOptionIds.length === 0 && Object.keys(correctOptionIdsByQuestion).length === 0) {
+      return null
+    }
+    return {
+      ...(correctOptionIds.length > 0 ? { correctOptionIds } : {}),
+      ...(Object.keys(correctOptionIdsByQuestion).length > 0
+        ? { correctOptionIdsByQuestion }
+        : {}),
+    }
   } catch {
     return null
   }

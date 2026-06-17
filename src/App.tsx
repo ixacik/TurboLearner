@@ -88,6 +88,9 @@ type TutorResponse = {
   concepts: string[]
   nextPrompt: string
   correctOptionIds?: string[]
+  correctOptionIdsByQuestion?: Record<string, string[]>
+  questionScores?: Record<string, number>
+  questionCorrectness?: Record<string, boolean>
 }
 
 type TutorStreamEvent =
@@ -394,7 +397,7 @@ function App() {
   const showNextQuestion = useCallback((pool = units, records = progress) => {
     if (pool.length === 0) return
     const next = chooseNextUnit(pool, records, recentIds.current)
-    recentIds.current = [next.id, ...recentIds.current.filter((id) => id !== next.id)].slice(0, 7)
+    recentIds.current = [next.id, ...recentIds.current.filter((id) => id !== next.id)].slice(0, 2)
     setCurrentId(next.id)
     resetQuestionState()
   }, [progress, resetQuestionState, setCurrentId, units])
@@ -494,11 +497,13 @@ function App() {
           },
         },
       )
-      const responseCorrectOptionIds = getResponseCorrectOptionIds(currentUnit, tutorResponse)
-      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
+      const responseCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(
         currentUnit,
+        tutorResponse,
+      )
+      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
         revealedCorrectOptionIdsByQuestion,
-        responseCorrectOptionIds,
+        responseCorrectOptionIdsByQuestion,
       )
       if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
         setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
@@ -546,7 +551,7 @@ function App() {
       )
     if (!latestAnswerMessage) return
 
-    const inferredCorrectOptionIds = getResponseCorrectOptionIds(currentUnit, {
+    const inferredCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(currentUnit, {
       isCorrect: false,
       score: 0,
       verdict: '',
@@ -554,39 +559,27 @@ function App() {
       concepts: [],
       nextPrompt: '',
     })
-    if (!inferredCorrectOptionIds?.length) return
+    if (Object.keys(inferredCorrectOptionIdsByQuestion).length === 0) return
 
     const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
-      currentUnit,
       revealedCorrectOptionIdsByQuestion,
-      inferredCorrectOptionIds,
+      inferredCorrectOptionIdsByQuestion,
     )
     if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
       setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
     }
 
-    if (result?.verdict !== 'Learning mode') return
-    const nextAnswers = applyResponseCorrectOptionIds(
-      currentUnit,
-      answersByQuestion,
-      inferredCorrectOptionIds,
-    )
-    if (nextAnswers !== answersByQuestion) setAnswersByQuestion(nextAnswers)
   }, [
-    answersByQuestion,
     currentUnit,
     isAnswerKeyRevealed,
     messages,
-    result?.verdict,
     revealedCorrectOptionIdsByQuestion,
-    setAnswersByQuestion,
     setRevealedCorrectOptionIdsByQuestion,
   ])
 
   const explainFromZero = useCallback(async () => {
     if (!currentUnit || isGrading) return
 
-    const revealedAnswers = buildCorrectAnswerPayload(currentUnit, answersByQuestion)
     const learningResult: TutorResponse = {
       isCorrect: false,
       score: 0,
@@ -596,7 +589,6 @@ function App() {
       nextPrompt: 'Try explaining the concept back in your own words.',
     }
 
-    setAnswersByQuestion(revealedAnswers)
     setResult(learningResult)
     recordAnswer(currentUnit, learningResult)
     setIsGrading(true)
@@ -617,7 +609,7 @@ function App() {
           sessionId: tutorSessionId,
           mode: 'learn',
           question: buildTutorQuestion(currentUnit),
-          answer: buildAnswerPayload(currentUnit, revealedAnswers),
+          answer: buildAnswerPayload(currentUnit, answersByQuestion),
           messages,
         },
         {
@@ -627,21 +619,17 @@ function App() {
           },
         },
       )
-      const responseCorrectOptionIds = getResponseCorrectOptionIds(currentUnit, tutorResponse)
-      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
+      const responseCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(
         currentUnit,
+        tutorResponse,
+      )
+      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
         revealedCorrectOptionIdsByQuestion,
-        responseCorrectOptionIds,
+        responseCorrectOptionIdsByQuestion,
       )
       if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
         setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
       }
-      const nextAnswers = applyResponseCorrectOptionIds(
-        currentUnit,
-        revealedAnswers,
-        responseCorrectOptionIds,
-      )
-      if (nextAnswers !== revealedAnswers) setAnswersByQuestion(nextAnswers)
       setMessages([
         ...previousMessages,
         { role: 'tutor', content: tutorResponse.explanation, kind: 'learning' },
@@ -661,7 +649,6 @@ function App() {
     isGrading,
     messages,
     recordAnswer,
-    setAnswersByQuestion,
     setIsAnswerKeyRevealed,
     setMessages,
     setRevealedCorrectOptionIdsByQuestion,
@@ -823,6 +810,7 @@ function App() {
                   answer={answersByQuestion[question.id] ?? {}}
                   disabled={Boolean(result) || isAnswerKeyRevealed}
                   showAnswerKey={Boolean(result) || isAnswerKeyRevealed}
+                  openAnswerState={getOpenAnswerState(currentUnit, question, result)}
                   revealedCorrectOptionIds={revealedCorrectOptionIdsByQuestion[question.id] ?? []}
                   showHeading={currentUnit.questions.length > 1}
                   onToggleOption={toggleOption}
@@ -986,7 +974,7 @@ function App() {
               ref={chatTextareaRef}
               value={chatInput}
               onChange={(event) => setChatInput(event.target.value)}
-              placeholder={result?.nextPrompt || 'Ask Codex about this question...'}
+              placeholder="Ask Codex about this question..."
               disabled={isGrading}
               rows={1}
               onKeyDown={(event) => {
@@ -1016,6 +1004,7 @@ function QuestionPrompt({
   answer,
   disabled,
   showAnswerKey,
+  openAnswerState,
   revealedCorrectOptionIds,
   showHeading,
   onToggleOption,
@@ -1025,15 +1014,31 @@ function QuestionPrompt({
   answer: AnswerPayload
   disabled: boolean
   showAnswerKey: boolean
+  openAnswerState: 'correct' | 'partial' | 'incorrect' | null
   revealedCorrectOptionIds: string[]
   showHeading: boolean
   onToggleOption: (question: Question, optionId: string) => void
   onOpenAnswerChange: (questionId: string, text: string) => void
 }) {
+  const openAnswerTextareaRef = useRef<HTMLTextAreaElement>(null)
   const selectedOptionIds = answer.selectedOptionIds ?? []
   const correctOptionIds = revealedCorrectOptionIds.length > 0
     ? revealedCorrectOptionIds
     : getCorrectOptionIds(question)
+  const hasKnownCorrectOptionIds = correctOptionIds.length > 0
+
+  useLayoutEffect(() => {
+    const textarea = openAnswerTextareaRef.current
+    if (!textarea) return
+
+    if (question.type !== 'open' || !showAnswerKey) {
+      textarea.style.height = ''
+      return
+    }
+
+    textarea.style.height = 'auto'
+    textarea.style.height = `${textarea.scrollHeight}px`
+  }, [answer.text, question.type, showAnswerKey])
 
   return (
     <section className="subquestion">
@@ -1046,7 +1051,8 @@ function QuestionPrompt({
       <MarkdownBlock className="question-prose">{question.prompt}</MarkdownBlock>
       {question.type === 'open' ? (
         <textarea
-          className="answer-textarea"
+          ref={openAnswerTextareaRef}
+          className={openAnswerTextareaClassName(openAnswerState, showAnswerKey)}
           value={answer.text ?? ''}
           onChange={(event) => onOpenAnswerChange(question.id, event.target.value)}
           placeholder="Write a short exam-style answer..."
@@ -1056,12 +1062,19 @@ function QuestionPrompt({
         <div className="options-grid">
           {question.options.map((option) => {
             const isSelected = selectedOptionIds.includes(option.id)
-            const isCorrect = showAnswerKey && correctOptionIds.includes(option.id)
-            const isIncorrect = showAnswerKey && isSelected && !correctOptionIds.includes(option.id)
+            const isCorrect = showAnswerKey && hasKnownCorrectOptionIds && correctOptionIds.includes(option.id)
+            const isSelectedCorrect = isSelected && isCorrect
+            const isSelectedIncorrect = showAnswerKey && hasKnownCorrectOptionIds && isSelected && !isCorrect
+            const isModelOnlyCorrect = isCorrect && !isSelected
             return (
               <label
                 key={option.id}
-                className={optionButtonClassName(isSelected || isCorrect, isCorrect, isIncorrect)}
+                className={optionButtonClassName(
+                  isSelected,
+                  isSelectedCorrect,
+                  isSelectedIncorrect,
+                  isModelOnlyCorrect,
+                )}
               >
                   <input
                     type={question.type === 'single' ? 'radio' : 'checkbox'}
@@ -1080,13 +1093,54 @@ function QuestionPrompt({
   )
 }
 
-function optionButtonClassName(isSelected: boolean, isCorrect: boolean, isIncorrect: boolean) {
+function optionButtonClassName(
+  isSelected: boolean,
+  isSelectedCorrect: boolean,
+  isSelectedIncorrect: boolean,
+  isModelOnlyCorrect: boolean,
+) {
   return [
     'option-button',
     isSelected ? 'selected' : '',
-    isCorrect ? 'correct-answer' : '',
-    isIncorrect ? 'incorrect-answer' : '',
+    isSelectedCorrect ? 'correct-answer' : '',
+    isSelectedIncorrect ? 'incorrect-answer' : '',
+    isModelOnlyCorrect ? 'model-answer' : '',
   ].filter(Boolean).join(' ')
+}
+
+function openAnswerTextareaClassName(
+  state: 'correct' | 'partial' | 'incorrect' | null,
+  showAnswerKey: boolean,
+) {
+  return [
+    'answer-textarea',
+    showAnswerKey ? 'answer-key-visible' : '',
+    state === 'correct' ? 'correct-answer' : '',
+    state === 'partial' ? 'partial-answer' : '',
+    state === 'incorrect' ? 'incorrect-answer' : '',
+  ].filter(Boolean).join(' ')
+}
+
+function getOpenAnswerState(
+  unit: QuestionUnit,
+  question: Question,
+  result: TutorResponse | null,
+): 'correct' | 'partial' | 'incorrect' | null {
+  if (!result || question.type !== 'open') return null
+
+  const questionScore = result.questionScores?.[question.id]
+  if (typeof questionScore === 'number') {
+    if (result.questionCorrectness?.[question.id] === true || questionScore >= 0.8) return 'correct'
+    if (questionScore > 0) return 'partial'
+    return 'incorrect'
+  }
+
+  const openQuestions = unit.questions.filter((unitQuestion) => unitQuestion.type === 'open')
+  if (openQuestions.length !== 1) return null
+
+  if (result.isCorrect || result.score >= 0.8) return 'correct'
+  if (result.score > 0) return 'partial'
+  return 'incorrect'
 }
 
 function ExamMenu({
@@ -1388,47 +1442,19 @@ function normalizeAnswer(question: Question, answer: AnswerPayload = {}) {
   return { selectedOptionIds: answer.selectedOptionIds ?? [] }
 }
 
-function buildCorrectAnswerPayload(
-  unit: QuestionUnit,
-  existingAnswers: Record<string, AnswerPayload>,
-) {
-  return unit.questions.reduce<Record<string, AnswerPayload>>((answers, question) => {
-    if (question.type === 'open') {
-      answers[question.id] = existingAnswers[question.id] ?? { text: '' }
-      return answers
-    }
-
-    const correctOptionIds = getCorrectOptionIds(question)
-    answers[question.id] = {
-      selectedOptionIds: correctOptionIds.length > 0
-        ? correctOptionIds
-        : existingAnswers[question.id]?.selectedOptionIds ?? [],
-    }
-    return answers
-  }, { ...existingAnswers })
-}
-
-function applyResponseCorrectOptionIds(
-  unit: QuestionUnit,
-  existingAnswers: Record<string, AnswerPayload>,
-  correctOptionIds: string[] | undefined,
-) {
-  if (!correctOptionIds?.length) return existingAnswers
-  const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
-  if (choiceQuestions.length !== 1) return existingAnswers
-
-  return {
-    ...existingAnswers,
-    [choiceQuestions[0].id]: { selectedOptionIds: correctOptionIds },
+function getResponseCorrectOptionIdsByQuestion(unit: QuestionUnit, response: TutorResponse) {
+  if (response.correctOptionIdsByQuestion && Object.keys(response.correctOptionIdsByQuestion).length > 0) {
+    return response.correctOptionIdsByQuestion
   }
-}
 
-function getResponseCorrectOptionIds(unit: QuestionUnit, response: TutorResponse) {
-  if (response.correctOptionIds?.length) return response.correctOptionIds
   const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
-  if (choiceQuestions.length !== 1) return undefined
+  if (choiceQuestions.length !== 1) return {}
 
-  return inferCorrectOptionIdsFromText(choiceQuestions[0], response.explanation)
+  const correctOptionIds = response.correctOptionIds?.length
+    ? response.correctOptionIds
+    : inferCorrectOptionIdsFromText(choiceQuestions[0], response.explanation)
+
+  return correctOptionIds?.length ? { [choiceQuestions[0].id]: correctOptionIds } : {}
 }
 
 function inferCorrectOptionIdsFromText(question: Question, text: string) {
@@ -1455,17 +1481,14 @@ function inferCorrectOptionIdsFromText(question: Question, text: string) {
 }
 
 function buildRevealedCorrectOptionIds(
-  unit: QuestionUnit,
   existingCorrectOptionIds: Record<string, string[]>,
-  correctOptionIds: string[] | undefined,
+  correctOptionIdsByQuestion: Record<string, string[]>,
 ) {
-  if (!correctOptionIds?.length) return existingCorrectOptionIds
-  const choiceQuestions = unit.questions.filter((question) => question.type !== 'open')
-  if (choiceQuestions.length !== 1) return existingCorrectOptionIds
+  if (Object.keys(correctOptionIdsByQuestion).length === 0) return existingCorrectOptionIds
 
   return {
     ...existingCorrectOptionIds,
-    [choiceQuestions[0].id]: correctOptionIds,
+    ...correctOptionIdsByQuestion,
   }
 }
 
@@ -1537,7 +1560,7 @@ function updateRecord(record: ProgressRecord, isCorrect: boolean, now: number) {
   const intervals = [soon, 5 * 60 * 1000, 25 * 60 * 1000, 2 * 60 * 60 * 1000]
   const interval = isCorrect
     ? intervals[Math.min(streak, intervals.length - 1)] * ease
-    : 45 * 1000
+    : 0
 
   return {
     attempts,
