@@ -13,6 +13,7 @@ import {
 import type {
   ComponentProps,
   CSSProperties,
+  FormEvent,
   PointerEvent as ReactPointerEvent,
   RefObject,
   SetStateAction,
@@ -24,6 +25,8 @@ import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import mermaid from 'mermaid'
+import { Link, useLoaderData, useNavigate, useParams, useSearchParams } from 'react-router'
+import type { LoaderFunctionArgs } from 'react-router'
 import 'katex/dist/katex.min.css'
 import './App.css'
 
@@ -134,6 +137,44 @@ type CourseContextState = {
   error: string | null
 }
 
+type Topic = {
+  id: string
+  name: string
+  emoji: string
+  examCount: number
+  sourceCount: number
+  seen: number
+  last25: HistoryItem[]
+  correctLast25: number
+  createdAt: string
+  updatedAt: string
+}
+
+type TopicSource = {
+  id: string
+  name: string
+  size: number
+  extension: string
+  extractionStatus: 'pending' | 'ready' | 'error'
+  extractionError: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+type TopicRouteState = {
+  topicId: string
+  bank: QuestionBank
+  context: CourseContextState
+  generation: ExamGenerationState
+  sessions: Record<string, ExamSession>
+  sources: TopicSource[]
+}
+
+type AppLoaderData = {
+  topics: Topic[]
+  topicState: TopicRouteState | null
+}
+
 type ExamGenerationStatus = 'idle' | 'processing' | 'ready' | 'error'
 
 type ExamGenerationLogEntry = {
@@ -224,7 +265,9 @@ function identity<T>(value: T) {
 }
 
 const activeSetKey = 'turbolearner.activeSet.v1'
+const activeTopicKey = 'turbolearner.activeTopic.v1'
 const examSessionsKey = 'turbolearner.examSessions.v1'
+const sqliteMigrationKey = 'turbolearner.sqliteMigration.v1'
 const codexSidebarWidthKey = 'turbolearner.codexSidebarWidth.v1'
 const defaultCodexSidebarWidth = 480
 const minCodexSidebarWidth = 360
@@ -411,15 +454,58 @@ function shouldSkipSourceSpanChildren(tagName: string) {
 
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' })
 
+export async function rootLoader(): Promise<AppLoaderData> {
+  return {
+    topics: await loadTopicsFromApi(),
+    topicState: null,
+  }
+}
+
+export async function topicLoader({ params }: LoaderFunctionArgs): Promise<AppLoaderData> {
+  const topicId = params.topicId
+  if (!topicId) throw new Error('Topic not found.')
+  const [
+    topics,
+    bank,
+    context,
+    generation,
+    sessionsPayload,
+    sourcesPayload,
+  ] = await Promise.all([
+    loadTopicsFromApi(),
+    fetch(`/api/topics/${encodeURIComponent(topicId)}/question-bank`).then(jsonResponse<QuestionBank>),
+    fetch(`/api/topics/${encodeURIComponent(topicId)}/context`).then(jsonResponse<CourseContextState>),
+    fetch(`/api/topics/${encodeURIComponent(topicId)}/exam-generation`).then(jsonResponse<ExamGenerationState>),
+    fetch(`/api/topics/${encodeURIComponent(topicId)}/sessions`).then(jsonResponse<{ sessions: Record<string, ExamSession> }>),
+    fetch(`/api/topics/${encodeURIComponent(topicId)}/sources`).then(jsonResponse<{ sources: TopicSource[] }>),
+  ])
+
+  return {
+    topics,
+    topicState: {
+      topicId,
+      bank,
+      context,
+      generation,
+      sessions: sessionsPayload.sessions,
+      sources: sourcesPayload.sources,
+    },
+  }
+}
+
 function App() {
-  const [bank, setBank] = useState<QuestionBank | null>(null)
-  const [selectedSetId, setSelectedSetId] = useLocalState<string | null>(activeSetKey, null)
-  const [examSessions, setExamSessions] = useLocalState<Record<string, ExamSession>>(
-    examSessionsKey,
-    {},
-    prepareExamSessionsForStorage,
-    { persistenceDelayMs: localStatePersistenceDelayMs },
-  )
+  const loaderData = useLoaderData() as AppLoaderData
+  const navigate = useNavigate()
+  const routeParams = useParams<{ topicId?: string; setId?: string }>()
+  const [searchParams] = useSearchParams()
+  const selectedTopicId = routeParams.topicId ?? null
+  const selectedSetId = routeParams.setId ?? null
+  const [topics, setTopics] = useState<Topic[]>(loaderData.topics)
+  const [loadedTopicId, setLoadedTopicId] = useState<string | null>(loaderData.topicState?.topicId ?? null)
+  const [bank, setBank] = useState<QuestionBank | null>(loaderData.topicState?.bank ?? null)
+  const [examSessions, setExamSessions] = useState<Record<string, ExamSession>>(loaderData.topicState?.sessions ?? {})
+  const [topicSources, setTopicSources] = useState<TopicSource[]>(loaderData.topicState?.sources ?? [])
+  const [hasRunLocalStorageMigration, setHasRunLocalStorageMigration] = useState(false)
   const [isGrading, setIsGrading] = useState(false)
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false)
   const [codexStatus, setCodexStatus] = useState('')
@@ -435,9 +521,9 @@ function App() {
   } = useBatchedStreamingText()
   const [streamingMessageKind, setStreamingMessageKind] = useState<TutorMessage['kind'] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [courseContext, setCourseContext] = useState<CourseContextState>(emptyCourseContextState)
+  const [courseContext, setCourseContext] = useState<CourseContextState>(loaderData.topicState?.context ?? emptyCourseContextState)
   const [isContextModalOpen, setIsContextModalOpen] = useState(false)
-  const [examGeneration, setExamGeneration] = useState<ExamGenerationState>(emptyExamGenerationState)
+  const [examGeneration, setExamGeneration] = useState<ExamGenerationState>(loaderData.topicState?.generation ?? emptyExamGenerationState)
   const [isExamGenerationModalOpen, setIsExamGenerationModalOpen] = useState(false)
   const [examGenerationToast, setExamGenerationToast] = useState<string | null>(null)
   const chatComposerRef = useRef<ChatComposerHandle>(null)
@@ -447,6 +533,7 @@ function App() {
   const codexScrollIntentResetRef = useRef<number | null>(null)
   const courseContextSignatureRef = useRef<string | null>(null)
   const examGenerationStatusRef = useRef<ExamGenerationStatus>('idle')
+  const activeTopic = topics.find((topic) => topic.id === selectedTopicId) ?? null
   const activeSession = selectedSetId ? examSessions[selectedSetId] ?? null : null
   const progress = activeSession?.progress ?? emptyProgressRecords
   const history = activeSession?.history ?? emptyHistoryItems
@@ -486,12 +573,6 @@ function App() {
     }))
   }, [updateActiveSession])
 
-  const setProgress = useCallback((value: SetStateAction<Record<string, ProgressRecord>>) => {
-    updateActiveSessionField('progress', value)
-  }, [updateActiveSessionField])
-  const setHistory = useCallback((value: SetStateAction<HistoryItem[]>) => {
-    updateActiveSessionField('history', value)
-  }, [updateActiveSessionField])
   const setCurrentId = useCallback((value: SetStateAction<string | null>) => {
     updateActiveSessionField('currentId', value)
   }, [updateActiveSessionField])
@@ -539,19 +620,27 @@ function App() {
     }
   }, [setTutorSessionId])
 
+  const refreshTopics = useCallback(async () => {
+    const nextTopics = await loadTopicsFromApi()
+    setTopics(nextTopics)
+    return nextTopics
+  }, [])
+
   const refreshCourseContext = useCallback(async () => {
-    const response = await fetch('/api/context')
+    if (!selectedTopicId) return
+    const response = await fetch(`/api/topics/${selectedTopicId}/context`)
     if (!response.ok) throw new Error(await response.text())
     applyCourseContextState(await response.json() as CourseContextState)
-  }, [applyCourseContextState])
+  }, [applyCourseContextState, selectedTopicId])
 
   const refreshQuestionBank = useCallback(async () => {
-    const response = await fetch('/api/question-bank')
+    if (!selectedTopicId) return null
+    const response = await fetch(`/api/topics/${selectedTopicId}/question-bank`)
     if (!response.ok) throw new Error(await response.text())
     const loadedBank = await response.json() as QuestionBank
     setBank(loadedBank)
     return loadedBank
-  }, [])
+  }, [selectedTopicId])
 
   const applyExamGenerationState = useCallback((nextGeneration: ExamGenerationState) => {
     const previousStatus = examGenerationStatusRef.current
@@ -568,93 +657,119 @@ function App() {
   }, [refreshQuestionBank])
 
   const refreshExamGeneration = useCallback(async () => {
-    const response = await fetch('/api/exam-generation')
+    if (!selectedTopicId) return
+    const response = await fetch(`/api/topics/${selectedTopicId}/exam-generation`)
     if (!response.ok) throw new Error(await response.text())
     applyExamGenerationState(await response.json() as ExamGenerationState)
-  }, [applyExamGenerationState])
+  }, [applyExamGenerationState, selectedTopicId])
 
-  useEffect(() => {
-    fetch('/api/question-bank')
-      .then((response) => {
-        if (!response.ok) return response.text().then((message) => Promise.reject(new Error(message)))
-        return response.json()
+  const importLegacyLocalStorageSessions = useCallback(async (topicId: string) => {
+    if (localStorage.getItem(sqliteMigrationKey)) return
+    const rawSessions = localStorage.getItem(examSessionsKey)
+    if (!rawSessions) {
+      localStorage.setItem(sqliteMigrationKey, JSON.stringify({ importedAt: Date.now(), imported: 0, skipped: 0 }))
+      return
+    }
+    const sessions = JSON.parse(rawSessions) as Record<string, ExamSession>
+    const activeSetId = localStorage.getItem(activeSetKey)
+      ? JSON.parse(localStorage.getItem(activeSetKey) || 'null') as string | null
+      : null
+    const response = await fetch(`/api/topics/${topicId}/sessions/import-localstorage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessions, activeSetId }),
+    })
+    if (!response.ok) throw new Error(await response.text())
+    const result = await response.json() as { imported: number; skipped: number; activeSetId: string | null }
+    localStorage.setItem(sqliteMigrationKey, JSON.stringify({ ...result, importedAt: Date.now() }))
+    if (result.activeSetId && !selectedTopicId) {
+      navigate(`/topics/${encodeURIComponent(topicId)}/exams/${encodeURIComponent(result.activeSetId)}`, {
+        replace: true,
       })
-      .then((loadedBank: QuestionBank) => {
-        setBank(loadedBank)
-        const questionOverrideId = new URLSearchParams(window.location.search).get('question')
-        if (!questionOverrideId) return
+    }
+  }, [navigate, selectedTopicId])
 
-        const override = findQuestionOverride(loadedBank, questionOverrideId)
-        if (!override) {
-          setError(`Question not found: ${questionOverrideId}`)
-          return
-        }
+  const applyQuestionOverride = useCallback((loadedBank: QuestionBank, questionOverrideId: string) => {
+    const override = findQuestionOverride(loadedBank, questionOverrideId)
+    if (!override) {
+      setError(`Question not found: ${questionOverrideId}`)
+      return
+    }
 
-        setExamSessions((sessions) => {
-          const existingSession = sessions[override.setId] ?? createExamSession({
-            currentId: override.unitId,
-            queue: [],
-          })
-          return {
-            ...sessions,
-            [override.setId]: resetExamSessionQuestionState(existingSession, {
-              currentId: override.unitId,
-              questionQueue: [],
-            }),
-          }
-        })
-        setSelectedSetId(override.setId)
-        setIsSubmittingAnswer(false)
-        setCodexStatus('')
-        clearStreamingTutorMessage()
-        setStreamingMessageKind(null)
-        setError(null)
+    setExamSessions((sessions) => {
+      const existingSession = sessions[override.setId] ?? createExamSession({
+        currentId: override.unitId,
+        queue: [],
       })
-      .catch((loadError) => setError(String(loadError)))
-  }, [
-    clearStreamingTutorMessage,
-    setExamSessions,
-    setSelectedSetId,
-  ])
+      return {
+        ...sessions,
+        [override.setId]: resetExamSessionQuestionState(existingSession, {
+          currentId: override.unitId,
+          questionQueue: [],
+        }),
+      }
+    })
+    if (selectedTopicId) {
+      navigate(`/topics/${encodeURIComponent(selectedTopicId)}/exams/${encodeURIComponent(override.setId)}`, {
+        replace: true,
+      })
+    }
+    setIsSubmittingAnswer(false)
+    setCodexStatus('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind(null)
+    setError(null)
+  }, [clearStreamingTutorMessage, navigate, selectedTopicId])
 
   useEffect(() => {
     let isCancelled = false
-    fetch('/api/context')
-      .then((response) => {
-        if (!response.ok) return response.text().then((message) => Promise.reject(new Error(message)))
-        return response.json()
-      })
-      .then((nextContext: CourseContextState) => {
-        if (!isCancelled) applyCourseContextState(nextContext)
-      })
-      .catch((contextError) => {
-        if (!isCancelled) setError(String(contextError))
-      })
-    return () => {
-      isCancelled = true
-    }
-  }, [applyCourseContextState])
-
-  useEffect(() => {
-    let isCancelled = false
-    fetch('/api/exam-generation')
-      .then((response) => {
-        if (!response.ok) return response.text().then((message) => Promise.reject(new Error(message)))
-        return response.json()
-      })
-      .then((nextGeneration: ExamGenerationState) => {
-        if (!isCancelled) {
-          examGenerationStatusRef.current = nextGeneration.status
-          setExamGeneration(nextGeneration)
+    async function boot() {
+      try {
+        const loadedTopics = loaderData.topics
+        if (isCancelled) return
+        const defaultTopic = loadedTopics[0]
+        if (defaultTopic && !hasRunLocalStorageMigration) {
+          await importLegacyLocalStorageSessions(defaultTopic.id)
+          if (!isCancelled) await refreshTopics()
+          if (!isCancelled) setHasRunLocalStorageMigration(true)
         }
-      })
-      .catch((generationError) => {
-        if (!isCancelled) setError(String(generationError))
-      })
+      } catch (bootError) {
+        if (!isCancelled) setError(String(bootError))
+      }
+    }
+    void boot()
     return () => {
       isCancelled = true
     }
-  }, [])
+  }, [hasRunLocalStorageMigration, importLegacyLocalStorageSessions, loaderData.topics, refreshTopics])
+
+  useLayoutEffect(() => {
+    setTopics(loaderData.topics)
+    const topicState = loaderData.topicState
+    if (!topicState) {
+      setLoadedTopicId(null)
+      setBank(null)
+      setExamSessions({})
+      setTopicSources([])
+      setCourseContext(emptyCourseContextState)
+      courseContextSignatureRef.current = null
+      examGenerationStatusRef.current = 'idle'
+      setExamGeneration(emptyExamGenerationState)
+      return
+    }
+
+    setLoadedTopicId(topicState.topicId)
+    setBank(topicState.bank)
+    setCourseContext(topicState.context)
+    courseContextSignatureRef.current = courseContextSignature(topicState.context)
+    examGenerationStatusRef.current = topicState.generation.status
+    setExamGeneration(topicState.generation)
+    setExamSessions(topicState.sessions)
+    setTopicSources(topicState.sources)
+
+    const questionOverrideId = searchParams.get('question')
+    if (questionOverrideId) applyQuestionOverride(topicState.bank, questionOverrideId)
+  }, [applyQuestionOverride, loaderData, searchParams])
 
   useEffect(() => {
     if (courseContext.status !== 'processing') return
@@ -684,6 +799,20 @@ function App() {
     }, 1500)
     return () => window.clearInterval(interval)
   }, [examGeneration.status, refreshExamGeneration])
+
+  useEffect(() => {
+    if (!selectedTopicId || loadedTopicId !== selectedTopicId) return
+    const timeout = window.setTimeout(() => {
+      for (const [setId, session] of Object.entries(prepareExamSessionsForStorage(examSessions))) {
+        void fetch(`/api/topics/${selectedTopicId}/sessions/${encodeURIComponent(setId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session }),
+        }).catch((syncError) => setError(String(syncError)))
+      }
+    }, localStatePersistenceDelayMs)
+    return () => window.clearTimeout(timeout)
+  }, [examSessions, loadedTopicId, selectedTopicId])
 
   useEffect(() => {
     if (!examGenerationToast) return
@@ -729,6 +858,44 @@ function App() {
   const appShellStyle = {
     '--codex-sidebar-width': `${boundedCodexSidebarWidth}px`,
   } as CSSProperties
+
+  useEffect(() => {
+    localStorage.setItem(activeTopicKey, JSON.stringify(selectedTopicId))
+    localStorage.setItem(activeSetKey, JSON.stringify(selectedSetId))
+  }, [selectedSetId, selectedTopicId])
+
+  useLayoutEffect(() => {
+    if (!selectedSetId || loadedTopicId !== selectedTopicId) return
+    const nextSet = allSets.find((set) => set.id === selectedSetId)
+    if (!nextSet) {
+      if (selectedTopicId) navigate(`/topics/${encodeURIComponent(selectedTopicId)}`, { replace: true })
+      return
+    }
+
+    const nextUnits = buildQuestionUnits(nextSet.questions)
+    setExamSessions((sessions) => {
+      const existingSession = sessions[selectedSetId]
+      if (isExamSessionValid(existingSession, nextUnits)) return sessions
+      return {
+        ...sessions,
+        [selectedSetId]: createExamSession(buildInitialQuestionDeck(nextUnits)),
+      }
+    })
+    setIsSubmittingAnswer(false)
+    setCodexStatus('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind(null)
+    setError(null)
+  }, [
+    allSets,
+    clearStreamingTutorMessage,
+    loadedTopicId,
+    navigate,
+    selectedSetId,
+    selectedTopicId,
+    setExamSessions,
+  ])
+
   const scrollCodexLogToBottom = useCallback(() => {
     const log = codexLogRef.current
     if (!log) return
@@ -861,40 +1028,6 @@ function App() {
     showNextQuestion()
   }, [showNextQuestion])
 
-  const startSet = useCallback((setId: string) => {
-    const nextSet = allSets.find((set) => set.id === setId)
-    if (!nextSet) return
-
-    const nextUnits = buildQuestionUnits(nextSet.questions)
-    setExamSessions((sessions) => {
-      const existingSession = sessions[setId]
-      if (isExamSessionValid(existingSession, nextUnits)) return sessions
-      return {
-        ...sessions,
-        [setId]: createExamSession(buildInitialQuestionDeck(nextUnits)),
-      }
-    })
-    setSelectedSetId(setId)
-    setIsSubmittingAnswer(false)
-    setCodexStatus('')
-    clearStreamingTutorMessage()
-    setStreamingMessageKind(null)
-    setError(null)
-  }, [
-    allSets,
-    clearStreamingTutorMessage,
-    setExamSessions,
-    setSelectedSetId,
-  ])
-
-  const returnToMenu = useCallback(() => {
-    setSelectedSetId(null)
-    setIsSubmittingAnswer(false)
-    setCodexStatus('')
-    clearStreamingTutorMessage()
-    setStreamingMessageKind(null)
-  }, [clearStreamingTutorMessage, setSelectedSetId])
-
   const toggleOption = useCallback((question: Question, optionId: string) => {
     if (result) return
     if (question.type === 'single') {
@@ -923,29 +1056,38 @@ function App() {
 
   const recordAnswer = useCallback((unit: QuestionUnit, tutorResponse: TutorResponse) => {
     const now = Date.now()
-    const nextProgress = { ...progress }
-    for (const question of unit.questions) {
-      const existing = progress[question.id] ?? {
-        attempts: 0,
-        correct: 0,
-        wrong: 0,
-        streak: 0,
-        dueAt: now,
-        ease: 1,
+    setExamSessions((sessions) => {
+      if (!selectedSetId) return sessions
+      const activeSession = sessions[selectedSetId]
+      if (!activeSession) return sessions
+
+      const nextSessions = {
+        ...sessions,
+        [selectedSetId]: applyAnsweredUnitToSession(activeSession, unit, tutorResponse.isCorrect, now),
       }
-      nextProgress[question.id] = updateRecord(existing, tutorResponse.isCorrect, now)
-    }
-    setProgress(nextProgress)
-    setHistory((items) => [
-      {
-        questionId: unit.id,
-        title: `${unit.source}: ${unit.title}`,
-        isCorrect: tutorResponse.isCorrect,
-        answeredAt: now,
-      },
-      ...items,
-    ])
-  }, [progress, setHistory, setProgress])
+
+      if (selectedSetId !== 'all-questions') return nextSessions
+
+      for (const [sourceSetId, sourceUnit] of sourceQuestionUnitsBySet(unit)) {
+        if (sourceSetId === selectedSetId) continue
+        const sourceSet = allSets.find((set) => set.id === sourceSetId && set.id !== 'all-questions')
+        if (!sourceSet) continue
+
+        const sourceSession =
+          nextSessions[sourceSetId] ??
+          createExamSession(buildInitialQuestionDeck(buildQuestionUnits(sourceSet.questions)))
+
+        nextSessions[sourceSetId] = applyAnsweredUnitToSession(
+          sourceSession,
+          sourceUnit,
+          tutorResponse.isCorrect,
+          now,
+        )
+      }
+
+      return nextSessions
+    })
+  }, [allSets, selectedSetId, setExamSessions])
 
   const submitAnswer = useCallback(async () => {
     if (!currentUnit || isGrading) return
@@ -964,6 +1106,7 @@ function App() {
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
+          topicId: selectedTopicId,
           sessionId: tutorSessionId,
           mode: 'submit',
           question: tutorQuestion,
@@ -1020,6 +1163,7 @@ function App() {
     setRevealedCorrectOptionIdsByQuestion,
     setResult,
     setStreamingMessageKind,
+    selectedTopicId,
     tutorSessionId,
     revealedCorrectOptionIdsByQuestion,
     usedLearningBeforeAnswer,
@@ -1045,6 +1189,7 @@ function App() {
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
+          topicId: selectedTopicId,
           sessionId: tutorSessionId,
           mode: 'chat',
           phase: 'pre_submit',
@@ -1083,6 +1228,7 @@ function App() {
     setMessages,
     setStreamingMessageKind,
     setUsedLearningBeforeAnswer,
+    selectedTopicId,
     tutorSessionId,
   ])
 
@@ -1136,6 +1282,7 @@ function App() {
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
+          topicId: selectedTopicId,
           sessionId: tutorSessionId,
           mode: 'chat',
           phase: result ? 'post_submit' : 'pre_submit',
@@ -1169,22 +1316,27 @@ function App() {
     result,
     setMessages,
     setStreamingMessageKind,
+    selectedTopicId,
     tutorSessionId,
   ])
 
-  const uploadCourseContextFiles = useCallback(async (files: FileList | File[]) => {
+  const uploadTopicSourceFiles = useCallback(async (files: FileList | File[]) => {
+    if (!selectedTopicId) return
     const selectedFiles = Array.from(files)
     if (selectedFiles.length === 0) return
     const formData = new FormData()
     for (const file of selectedFiles) formData.append('files', file)
 
     try {
-      const response = await fetch('/api/context/files', {
+      const response = await fetch(`/api/topics/${selectedTopicId}/sources/files`, {
         method: 'POST',
         body: formData,
       })
       if (!response.ok) throw new Error(await response.text())
-      applyCourseContextState(await response.json() as CourseContextState)
+      const payload = await response.json() as { sources: TopicSource[]; context: CourseContextState }
+      setTopicSources(payload.sources)
+      applyCourseContextState(payload.context)
+      await refreshTopics()
     } catch (uploadError) {
       setCourseContext({
         ...emptyCourseContextState,
@@ -1192,20 +1344,13 @@ function App() {
         error: String(uploadError),
       })
     }
-  }, [applyCourseContextState])
+  }, [applyCourseContextState, refreshTopics, selectedTopicId])
 
-  const uploadExamGenerationFiles = useCallback(async (files: FileList | File[]) => {
-    const selectedFiles = Array.from(files)
-    if (selectedFiles.length === 0) return
-    const formData = new FormData()
-    for (const file of selectedFiles) formData.append('files', file)
-
+  const startExamGeneration = useCallback(async () => {
+    if (!selectedTopicId) return
     try {
       setIsExamGenerationModalOpen(true)
-      const response = await fetch('/api/exam-generation/files', {
-        method: 'POST',
-        body: formData,
-      })
+      const response = await fetch(`/api/topics/${selectedTopicId}/exam-generation`, { method: 'POST' })
       if (!response.ok) throw new Error(await response.text())
       applyExamGenerationState(await response.json() as ExamGenerationState)
     } catch (uploadError) {
@@ -1223,26 +1368,63 @@ function App() {
       })
       setIsExamGenerationModalOpen(true)
     }
-  }, [applyExamGenerationState])
+  }, [applyExamGenerationState, selectedTopicId])
 
   const clearCourseContext = useCallback(async () => {
-    const response = await fetch('/api/context', { method: 'DELETE' })
+    if (!selectedTopicId) return
+    const response = await fetch(`/api/topics/${selectedTopicId}/context`, { method: 'DELETE' })
     if (!response.ok) throw new Error(await response.text())
     applyCourseContextState(await response.json() as CourseContextState)
     setIsContextModalOpen(false)
-  }, [applyCourseContextState])
+  }, [applyCourseContextState, selectedTopicId])
 
   const clearExamGeneration = useCallback(async () => {
-    const response = await fetch('/api/exam-generation', { method: 'DELETE' })
+    if (!selectedTopicId) return
+    const response = await fetch(`/api/topics/${selectedTopicId}/exam-generation`, { method: 'DELETE' })
     if (!response.ok) throw new Error(await response.text())
     applyExamGenerationState(await response.json() as ExamGenerationState)
     setIsExamGenerationModalOpen(false)
-  }, [applyExamGenerationState])
+  }, [applyExamGenerationState, selectedTopicId])
 
-  if (!bank) {
+  const createTopic = useCallback(async (name: string, emoji: string) => {
+    const response = await fetch('/api/topics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, emoji }),
+    })
+    if (!response.ok) throw new Error(await response.text())
+    const topic = await response.json() as Topic
+    await refreshTopics()
+    navigate(`/topics/${encodeURIComponent(topic.id)}`)
+    setError(null)
+  }, [navigate, refreshTopics])
+
+  const deleteTopicSourceById = useCallback(async (sourceId: string) => {
+    if (!selectedTopicId) return
+    const response = await fetch(`/api/topics/${selectedTopicId}/sources/${sourceId}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(await response.text())
+    const payload = await response.json() as { sources: TopicSource[]; context: CourseContextState }
+    setTopicSources(payload.sources)
+    applyCourseContextState(payload.context)
+    await refreshTopics()
+  }, [applyCourseContextState, refreshTopics, selectedTopicId])
+
+  if (!selectedTopicId) {
+    return (
+      <main className="app-shell">
+        <TopicMenu
+          topics={topics}
+          onCreateTopic={createTopic}
+          error={error}
+        />
+      </main>
+    )
+  }
+
+  if (!bank || loadedTopicId !== selectedTopicId || !activeTopic) {
     return (
       <main className="app-shell centered">
-        <div className="loading-panel">Loading question bank...</div>
+        <div className="loading-panel">Loading topic...</div>
       </main>
     )
   }
@@ -1251,14 +1433,26 @@ function App() {
     return (
       <main className="app-shell">
         <ExamMenu
+          topic={activeTopic}
           sets={allSets}
           examSessions={examSessions}
           examGeneration={examGeneration}
-          onStart={startSet}
-          onUploadExamFiles={uploadExamGenerationFiles}
+          sources={topicSources}
+          context={courseContext}
+          onDeleteSource={deleteTopicSourceById}
+          onGenerateExam={startExamGeneration}
+          onUploadSourceFiles={uploadTopicSourceFiles}
+          onOpenContextModal={() => setIsContextModalOpen(true)}
           onOpenExamGenerationModal={() => setIsExamGenerationModalOpen(true)}
           error={error}
         />
+        {isContextModalOpen && (
+          <ContextModal
+            context={courseContext}
+            onClear={() => void clearCourseContext()}
+            onClose={() => setIsContextModalOpen(false)}
+          />
+        )}
         {isExamGenerationModalOpen && (
           <ExamGenerationModal
             generation={examGeneration}
@@ -1292,7 +1486,7 @@ function App() {
         onExplainConcept={explainConceptBeforeAnswering}
         onNextAfterResult={handleNextQuestionAfterResult}
         onOpenAnswerChange={updateOpenAnswer}
-        onReturnToMenu={returnToMenu}
+        menuHref={`/topics/${encodeURIComponent(activeTopic.id)}`}
         onSkipQuestion={handleSkipQuestion}
         onSubmitAnswer={submitAnswer}
         onToggleOption={toggleOption}
@@ -1352,7 +1546,6 @@ function App() {
         onMarkCodexLogUserScroll={markCodexLogUserScroll}
         onOpenContextModal={() => setIsContextModalOpen(true)}
         onSendChat={sendChat}
-        onUploadContextFiles={uploadCourseContextFiles}
         result={result}
         resetKey={tutorSessionId}
         streamingMessageKind={streamingMessageKind}
@@ -1386,7 +1579,7 @@ const TrainerPanel = memo(function TrainerPanel({
   onExplainConcept,
   onNextAfterResult,
   onOpenAnswerChange,
-  onReturnToMenu,
+  menuHref,
   onSkipQuestion,
   onSubmitAnswer,
   onToggleOption,
@@ -1407,7 +1600,7 @@ const TrainerPanel = memo(function TrainerPanel({
   onExplainConcept: () => void
   onNextAfterResult: () => void
   onOpenAnswerChange: (questionId: string, text: string) => void
-  onReturnToMenu: () => void
+  menuHref: string
   onSkipQuestion: () => void
   onSubmitAnswer: () => void
   onToggleOption: (question: Question, optionId: string) => void
@@ -1419,9 +1612,9 @@ const TrainerPanel = memo(function TrainerPanel({
     <section className="trainer-panel">
       <header className="study-header">
         <div className="study-title">
-          <button className="ghost-button" type="button" onClick={onReturnToMenu}>
+          <Link className="ghost-button" to={menuHref}>
             Menu
-          </button>
+          </Link>
           <div>
             <h1>{title}</h1>
           </div>
@@ -1536,7 +1729,6 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
   onMarkCodexLogUserScroll: () => void
   onOpenContextModal: () => void
   onSendChat: (input: string) => void | Promise<void>
-  onUploadContextFiles: (files: FileList | File[]) => void | Promise<void>
   resetKey: string
   result: TutorResponse | null
   streamingMessageKind: TutorMessage['kind'] | null
@@ -1554,13 +1746,11 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
   onMarkCodexLogUserScroll,
   onOpenContextModal,
   onSendChat,
-  onUploadContextFiles,
   resetKey,
   result,
   streamingMessageKind,
   streamingTutorMessage,
 }, ref) {
-  const contextInputRef = useRef<HTMLInputElement>(null)
   const [markdownCopy, setMarkdownCopy] = useState<MarkdownCopyPopup | null>(null)
   const pendingMessage: TutorMessage | null = isGrading
     ? {
@@ -1569,9 +1759,6 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
         kind: streamingMessageKind ?? 'pending',
       }
     : null
-  const openContextPicker = useCallback(() => {
-    contextInputRef.current?.click()
-  }, [])
   const hideMarkdownCopy = useCallback(() => {
     setMarkdownCopy(null)
   }, [])
@@ -1639,25 +1826,12 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
           <p className="eyebrow">Codex</p>
         </div>
         <div className="context-controls">
-          <input
-            ref={contextInputRef}
-            className="context-file-input"
-            type="file"
-            accept=".pdf,.txt,.md,.csv,.json,.log,application/pdf,text/*"
-            multiple
-            onChange={(event) => {
-              const { files } = event.currentTarget
-              if (files?.length) void onUploadContextFiles(files)
-              event.currentTarget.value = ''
-            }}
-          />
           <button
             className={`context-button context-${courseContext.status}`}
             type="button"
             disabled={courseContext.status === 'processing'}
             onClick={() => {
-              if (courseContext.status === 'ready') onOpenContextModal()
-              else openContextPicker()
+              onOpenContextModal()
             }}
           >
             {courseContext.status === 'processing' && <span className="context-spinner" aria-hidden="true" />}
@@ -2232,74 +2406,330 @@ function getOpenAnswerState(
   return 'incorrect'
 }
 
-function ExamMenu({
-  sets,
-  examSessions,
-  examGeneration,
-  onStart,
-  onUploadExamFiles,
-  onOpenExamGenerationModal,
+function TopicMenu({
+  topics,
+  onCreateTopic,
   error,
 }: {
-  sets: QuestionSet[]
-  examSessions: Record<string, ExamSession>
-  examGeneration: ExamGenerationState
-  onStart: (id: string) => void
-  onUploadExamFiles: (files: FileList | File[]) => void | Promise<void>
-  onOpenExamGenerationModal: () => void
+  topics: Topic[]
+  onCreateTopic: (name: string, emoji: string) => void | Promise<void>
   error: string | null
 }) {
-  const examInputRef = useRef<HTMLInputElement>(null)
-  const isBusy = examGeneration.status === 'processing'
+  const [name, setName] = useState('')
+  const [emoji, setEmoji] = useState('📚')
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
+  const [isCreating, setIsCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const canCreate = name.trim().length > 0
+  const closeCreateModal = () => {
+    setIsCreateModalOpen(false)
+    setName('')
+    setEmoji('📚')
+    setCreateError(null)
+  }
+
+  const handleCreateTopic = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!canCreate || isCreating) return
+    const nextName = name.trim()
+    const nextEmoji = emoji.trim() || '📚'
+    setIsCreating(true)
+    setCreateError(null)
+    closeCreateModal()
+    try {
+      await onCreateTopic(nextName, nextEmoji)
+    } catch (createTopicError) {
+      setIsCreateModalOpen(true)
+      setName(nextName)
+      setEmoji(nextEmoji)
+      setCreateError(String(createTopicError))
+      setIsCreating(false)
+    }
+  }
 
   return (
-    <section className="menu-screen">
+    <section className="menu-screen topic-menu-screen">
       <div className="menu-heading">
-        <h1>Exams</h1>
+        <h1>Topics</h1>
         <div className="menu-actions">
-          <input
-            ref={examInputRef}
-            className="context-file-input"
-            type="file"
-            accept=".pdf,.txt,.md,.csv,.json,.log,application/pdf,text/*"
-            multiple
-            onChange={(event) => {
-              const { files } = event.currentTarget
-              if (files?.length) void onUploadExamFiles(files)
-              event.currentTarget.value = ''
-            }}
-          />
-          <button
-            className={`generate-exam-button generation-${examGeneration.status}`}
-            type="button"
-            onClick={() => {
-              if (examGeneration.status === 'processing' || examGeneration.status === 'ready' || examGeneration.status === 'error') {
-                onOpenExamGenerationModal()
-                return
-              }
-              examInputRef.current?.click()
-            }}
-          >
-            {isBusy && <span className="context-spinner" aria-hidden="true" />}
-            {examGeneration.status === 'idle' ? 'Generate exam' : examGenerationTileTitle(examGeneration)}
+          <button className="generate-exam-button" type="button" onClick={() => setIsCreateModalOpen(true)}>
+            Create topic
           </button>
         </div>
       </div>
-      <div className="menu-grid">
-        {sets.map((set, index) => {
-          const summary = examMenuSummary(examSessions[set.id])
-          return (
-            <button key={set.id} className="exam-tile" type="button" onClick={() => onStart(set.id)}>
-              <span>Exam {index + 1} · {set.questions.length} questions</span>
-              <strong>{set.title}</strong>
-              {set.description && <small>{compactExamDescription(set.description)}</small>}
-              <ExamTileProgress summary={summary} />
-            </button>
-          )
-        })}
+
+      <div className="menu-grid topic-grid">
+        {topics.map((topic) => (
+          <Link key={topic.id} className="exam-tile topic-tile" to={`/topics/${encodeURIComponent(topic.id)}`}>
+            <span>{topic.examCount} exams · {topic.sourceCount} sources</span>
+            <strong><span className="topic-emoji">{topic.emoji}</span>{topic.name}</strong>
+            <small>Seen {topic.seen} questions.</small>
+            <ExamTileProgress summary={{
+              last25: topic.last25 ?? [],
+              correctLast25: topic.correctLast25 ?? 0,
+              seen: topic.seen ?? 0,
+            }} />
+          </Link>
+        ))}
       </div>
       {error && <div className="error-box">{error}</div>}
+
+      {isCreateModalOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeCreateModal()
+          }}
+        >
+          <section
+            className="context-modal topic-create-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="topic-create-modal-title"
+          >
+            <header className="context-modal-header">
+              <div>
+                <p className="eyebrow">Topics</p>
+                <h2 id="topic-create-modal-title">Create topic</h2>
+              </div>
+              <button className="ghost-button" type="button" onClick={closeCreateModal}>
+                Close
+              </button>
+            </header>
+
+            <form className="topic-create-form" onSubmit={(event) => void handleCreateTopic(event)}>
+              <div className="topic-create-fields">
+                <input
+                  aria-label="Topic emoji"
+                  className="topic-emoji-input"
+                  value={emoji}
+                  maxLength={8}
+                  onChange={(event) => setEmoji(event.target.value)}
+                />
+                <input
+                  aria-label="Topic name"
+                  className="topic-name-input"
+                  value={name}
+                  placeholder="New topic name"
+                  autoFocus
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </div>
+              {createError && <div className="error-box">{createError}</div>}
+              <footer className="context-modal-actions">
+                <button className="secondary-button" type="button" onClick={closeCreateModal}>
+                  Cancel
+                </button>
+                <button className="generate-exam-button" type="submit" disabled={!canCreate || isCreating}>
+                  {isCreating ? 'Creating...' : 'Create topic'}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      )}
     </section>
+  )
+}
+
+function ExamMenu({
+  topic,
+  sets,
+  examSessions,
+  examGeneration,
+  sources,
+  context,
+  onDeleteSource,
+  onGenerateExam,
+  onUploadSourceFiles,
+  onOpenContextModal,
+  onOpenExamGenerationModal,
+  error,
+}: {
+  topic: Topic
+  sets: QuestionSet[]
+  examSessions: Record<string, ExamSession>
+  examGeneration: ExamGenerationState
+  sources: TopicSource[]
+  context: CourseContextState
+  onDeleteSource: (sourceId: string) => void | Promise<void>
+  onGenerateExam: () => void | Promise<void>
+  onUploadSourceFiles: (files: FileList | File[]) => void | Promise<void>
+  onOpenContextModal: () => void
+  onOpenExamGenerationModal: () => void
+  error: string | null
+}) {
+  const sourceInputRef = useRef<HTMLInputElement>(null)
+  const isBusy = examGeneration.status === 'processing'
+  const allQuestionsSet = sets.find((set) => set.id === 'all-questions') ?? null
+  const examSets = sets.filter((set) => set.id !== 'all-questions')
+
+  return (
+    <section className="menu-screen topic-exam-screen">
+      <aside className="source-sidebar">
+        <div className="source-sidebar-header">
+          <h2>Sources</h2>
+        </div>
+
+        <input
+          ref={sourceInputRef}
+          className="context-file-input"
+          type="file"
+          accept=".pdf,.txt,.md,.csv,.json,.log,application/pdf,text/*"
+          multiple
+          onChange={(event) => {
+            const { files } = event.currentTarget
+            if (files?.length) void onUploadSourceFiles(files)
+            event.currentTarget.value = ''
+          }}
+        />
+
+        <div className="source-actions">
+          <button
+            className="source-add-button"
+            type="button"
+            aria-label="Add lectures"
+            title="Add lectures"
+            onClick={() => sourceInputRef.current?.click()}
+          >
+            <PlusIcon />
+          </button>
+          <button
+            className={`context-button context-${context.status}`}
+            type="button"
+            disabled={context.status === 'processing'}
+            onClick={onOpenContextModal}
+          >
+            {context.status === 'processing' && <span className="context-spinner" aria-hidden="true" />}
+            {context.status === 'processing' ? 'Generating' : 'Context'}
+          </button>
+        </div>
+
+        <div className="source-list">
+          {sources.length === 0 ? (
+            <div className="empty-chat">No lecture sources yet.</div>
+          ) : sources.map((source) => (
+            <div key={source.id} className={`source-row source-${source.extractionStatus}`}>
+              <PdfSourceIcon />
+              <div>
+                <strong>{source.name}</strong>
+                <small>
+                  {formatBytes(source.size)}
+                  {source.extractionStatus !== 'ready' ? ` · ${source.extractionStatus}` : ''}
+                  {source.extractionError ? ` · ${source.extractionError}` : ''}
+                </small>
+              </div>
+              <button
+                className="source-remove-button"
+                type="button"
+                aria-label={`Remove ${source.name}`}
+                title={`Remove ${source.name}`}
+                onClick={() => void onDeleteSource(source.id)}
+              >
+                <TrashIcon />
+              </button>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      <div className="topic-exam-main">
+        <div className="menu-heading">
+          <div className="topic-main-heading">
+            <Link className="ghost-button" to="/">
+              <BackCaretIcon />
+              Topics
+            </Link>
+            <h1>{topic.emoji} {topic.name}</h1>
+          </div>
+          <div className="menu-actions">
+            <button
+              className={`generate-exam-button generation-${examGeneration.status}`}
+              type="button"
+              disabled={sources.length === 0 && examGeneration.status === 'idle'}
+              onClick={() => {
+                if (examGeneration.status === 'processing' || examGeneration.status === 'ready' || examGeneration.status === 'error') {
+                  onOpenExamGenerationModal()
+                  return
+                }
+                void onGenerateExam()
+              }}
+            >
+              {isBusy && <span className="context-spinner" aria-hidden="true" />}
+              {examGeneration.status === 'idle' ? 'Generate exam' : examGenerationTileTitle(examGeneration)}
+            </button>
+            {allQuestionsSet && (
+              <Link
+                className="all-questions-button"
+                to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(allQuestionsSet.id)}`}
+              >
+                All Questions
+                <span>{allQuestionsSet.questions.length}</span>
+              </Link>
+            )}
+          </div>
+        </div>
+        <div className="menu-grid">
+          {examSets.map((set, index) => {
+            const summary = examMenuSummary(examSessions[set.id])
+            return (
+              <Link
+                key={set.id}
+                className="exam-tile"
+                to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(set.id)}`}
+              >
+                <span>Exam {index + 1} · {set.questions.length} questions</span>
+                <strong>{set.title}</strong>
+                {set.description && <small>{compactExamDescription(set.description)}</small>}
+                <ExamTileProgress summary={summary} />
+              </Link>
+            )
+          })}
+        </div>
+        {error && <div className="error-box">{error}</div>}
+      </div>
+    </section>
+  )
+}
+
+function PdfSourceIcon() {
+  return (
+    <svg className="source-pdf-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path className="source-pdf-page" d="M5 2h10l4 4v16H5z" />
+      <path className="source-pdf-fold" d="M15 2v4h4z" />
+      <path className="source-pdf-label" d="M7 12h10v6H7z" />
+      <text x="12" y="16.25" textAnchor="middle">PDF</text>
+    </svg>
+  )
+}
+
+function PlusIcon() {
+  return (
+    <svg className="source-plus-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  )
+}
+
+function BackCaretIcon() {
+  return (
+    <svg className="back-caret-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M15 6l-6 6 6 6" />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg className="source-trash-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M6 6l1 16h10l1-16" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
   )
 }
 
@@ -2918,6 +3348,54 @@ function resetExamSessionQuestionState(
   }
 }
 
+function applyAnsweredUnitToSession(
+  session: ExamSession,
+  unit: QuestionUnit,
+  isCorrect: boolean,
+  now: number,
+): ExamSession {
+  const progress = session.progress ?? {}
+  const nextProgress = { ...progress }
+  for (const question of unit.questions) {
+    const existing = progress[question.id] ?? {
+      attempts: 0,
+      correct: 0,
+      wrong: 0,
+      streak: 0,
+      dueAt: now,
+      ease: 1,
+    }
+    nextProgress[question.id] = updateRecord(existing, isCorrect, now)
+  }
+
+  return {
+    ...session,
+    progress: nextProgress,
+    history: [
+      {
+        questionId: unit.id,
+        title: `${unit.source}: ${unit.title}`,
+        isCorrect,
+        answeredAt: now,
+      },
+      ...(session.history ?? []),
+    ],
+  }
+}
+
+function sourceQuestionUnitsBySet(unit: QuestionUnit) {
+  const questionsBySet = new Map<string, Question[]>()
+  for (const question of unit.questions) {
+    const questions = questionsBySet.get(question.setId) ?? []
+    questions.push(question)
+    questionsBySet.set(question.setId, questions)
+  }
+
+  return [...questionsBySet.entries()].flatMap(([setId, questions]) =>
+    buildQuestionUnits(questions).map((sourceUnit) => [setId, sourceUnit] as const),
+  )
+}
+
 function prepareExamSessionsForStorage(sessions: Record<string, ExamSession>): Record<string, ExamSession> {
   return Object.fromEntries(
     Object.entries(sessions).map(([setId, session]) => [
@@ -3072,6 +3550,16 @@ async function postTutorStream(
 
   if (!finalResponse) throw new Error('Codex stream ended without a tutor response.')
   return finalResponse
+}
+
+async function jsonResponse<T>(response: Response): Promise<T> {
+  if (!response.ok) throw new Error(await response.text())
+  return await response.json() as T
+}
+
+async function loadTopicsFromApi() {
+  const payload = await fetch('/api/topics').then(jsonResponse<{ topics: Topic[] }>)
+  return payload.topics
 }
 
 function readStreamLines(buffer: string, onLine: (line: string) => void) {

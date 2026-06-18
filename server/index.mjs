@@ -1,4 +1,5 @@
 import cors from 'cors'
+import Database from 'better-sqlite3'
 import express from 'express'
 import fs from 'node:fs'
 import multer from 'multer'
@@ -25,11 +26,19 @@ const generatedAssetsDir = path.join(contextDir, 'generated-assets')
 const examGenerationStatePath = path.join(contextDir, 'exam-generation.json')
 const generatedExamsPath = path.join(contextDir, 'generated-exams.json')
 const questionBankPath = path.join(appRoot, 'public', 'questions.json')
+const sqlitePath = path.join(contextDir, 'turbolearner.sqlite')
+const topicsDir = path.join(contextDir, 'topics')
+const defaultTopicId = 'machine-learning'
+const defaultTopicName = 'Machine Learning'
+const defaultTopicEmoji = '🧠'
 const textFileExtensions = new Set(['.txt', '.md', '.csv', '.json', '.log'])
 const acceptedContextExtensions = new Set(['.pdf', ...textFileExtensions])
 const examGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_EXAM_GENERATION_TURN_TIMEOUT_MS || 20 * 60 * 1000)
 
 const tutorThreads = new Map()
+const db = initializeDatabase()
+const topicContextJobs = new Map()
+const topicExamGenerationJobs = new Map()
 let contextState = loadContextState()
 let contextJobId = 0
 let examGenerationState = loadExamGenerationState()
@@ -39,9 +48,19 @@ let codex
 fs.mkdirSync(contextUploadsDir, { recursive: true })
 fs.mkdirSync(examUploadsDir, { recursive: true })
 fs.mkdirSync(generatedAssetsDir, { recursive: true })
+fs.mkdirSync(topicsDir, { recursive: true })
+await migrateLegacyContextSourcesForDefaultTopic()
 
 app.use(cors())
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '25mb' }))
+
+const uploadTopicSources = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 48,
+    fileSize: 100 * 1024 * 1024,
+  },
+})
 
 const uploadContextFiles = multer({
   storage: multer.diskStorage({
@@ -77,9 +96,227 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, codex: 'app-server', port })
 })
 
+app.get('/api/topics', (_req, res) => {
+  try {
+    res.json({ topics: listTopics() })
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics', (req, res) => {
+  try {
+    const name = nonEmptyString(req.body?.name, 'New Topic')
+    const emoji = typeof req.body?.emoji === 'string' && req.body.emoji.trim()
+      ? req.body.emoji.trim().slice(0, 8)
+      : '📚'
+    const topic = createTopic({ name, emoji })
+    res.status(201).json(topic)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.patch('/api/topics/:topicId', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    updateTopic(topicId, {
+      name: typeof req.body?.name === 'string' ? req.body.name : undefined,
+      emoji: typeof req.body?.emoji === 'string' ? req.body.emoji : undefined,
+    })
+    res.json(publicTopic(topicId))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.delete('/api/topics/:topicId', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    if (topicId === defaultTopicId) {
+      res.status(400).json({ error: 'The default migrated topic cannot be deleted.' })
+      return
+    }
+    deleteTopic(topicId)
+    res.json({ ok: true })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.get('/api/topics/:topicId/question-bank', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    res.json(topicQuestionBank(topicId))
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.get('/api/topics/:topicId/sources', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    res.json({ sources: listTopicSources(topicId) })
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics/:topicId/sources/files', uploadTopicSources.array('files', 48), async (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const files = Array.isArray(req.files) ? req.files : []
+    if (files.length === 0) {
+      res.status(400).json({ error: 'No files uploaded.' })
+      return
+    }
+    for (const file of files) await storeTopicSourceUpload(topicId, file)
+    queueTopicContextRefresh(topicId)
+    res.status(201).json({ sources: listTopicSources(topicId), context: publicTopicContextState(topicId) })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.delete('/api/topics/:topicId/sources/:sourceId', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    deleteTopicSource(topicId, req.params.sourceId)
+    queueTopicContextRefresh(topicId)
+    res.json({ sources: listTopicSources(topicId), context: publicTopicContextState(topicId) })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.get('/api/topics/:topicId/context', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    res.json(publicTopicContextState(topicId))
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics/:topicId/context/generate', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    if (listTopicSources(topicId).length === 0) {
+      res.status(400).json({ error: 'Upload lecture sources before generating context.' })
+      return
+    }
+    queueTopicContextRefresh(topicId)
+    res.status(202).json(publicTopicContextState(topicId))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.delete('/api/topics/:topicId/context', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    topicContextJobs.set(topicId, randomUUID())
+    upsertTopicContext(topicId, {
+      status: 'idle',
+      generatedAt: null,
+      injectedPrompt: '',
+      error: null,
+      jobId: null,
+    })
+    tutorThreads.clear()
+    res.json(publicTopicContextState(topicId))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.get('/api/topics/:topicId/exam-generation', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    res.json(publicTopicExamGenerationState(topicId))
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics/:topicId/exam-generation', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const sources = listTopicSources(topicId)
+    if (sources.length === 0) {
+      res.status(400).json({ error: 'Upload lecture sources before generating an exam.' })
+      return
+    }
+    const jobId = randomUUID()
+    topicExamGenerationJobs.set(topicId, jobId)
+    upsertGenerationJob({
+      id: jobId,
+      topicId,
+      type: 'exam',
+      status: 'processing',
+      phase: 'Queued',
+      log: [examGenerationLogEntry('status', 'Queued exam generation.')],
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      error: null,
+      resultId: null,
+    })
+    void generatePersistentExamForTopic(topicId, jobId)
+    res.status(202).json(publicTopicExamGenerationState(topicId))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.delete('/api/topics/:topicId/exam-generation', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    topicExamGenerationJobs.set(topicId, randomUUID())
+    deleteActiveGenerationJob(topicId, 'exam')
+    res.json(publicTopicExamGenerationState(topicId))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.get('/api/topics/:topicId/sessions', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    res.json({ sessions: getTopicSessions(topicId) })
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.put('/api/topics/:topicId/sessions/:setId', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const setId = String(req.params.setId || '')
+    if (!topicQuestionSetIds(topicId).has(setId)) {
+      res.status(404).json({ error: 'Question set not found for topic.' })
+      return
+    }
+    const session = sanitizeExamSessionForSet(topicId, setId, req.body?.session ?? req.body)
+    saveTopicSession(topicId, setId, session)
+    res.json({ session })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics/:topicId/sessions/import-localstorage', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const result = importLocalStorageSessions(topicId, req.body?.sessions, req.body?.activeSetId)
+    res.json(result)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
 app.get('/api/question-bank', (_req, res) => {
   try {
-    res.json(mergedQuestionBank())
+    res.json(topicQuestionBank(defaultTopicId))
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
   }
@@ -170,6 +407,24 @@ app.delete('/api/exam-generation', (_req, res) => {
   res.json(publicExamGenerationState())
 })
 
+app.get(/^\/api\/generated-assets\/([^/]+)\/([^/]+)\/([^/]+)$/, (req, res) => {
+  const [, rawTopicId, rawExamId, rawFile] = req.path.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)\/([^/]+)$/i) ?? []
+  const topicId = sanitizePathSegment(rawTopicId)
+  const examId = sanitizePathSegment(rawExamId)
+  const file = sanitizePathSegment(rawFile)
+  if (!topicId || !examId || !file || !/\.(png|jpe?g)$/i.test(file)) {
+    res.status(404).send('File not found')
+    return
+  }
+  const topicFilePath = path.join(topicPath(topicId), 'generated-assets', examId, file)
+  const filePath = fs.existsSync(topicFilePath)
+    ? topicFilePath
+    : path.join(generatedAssetsDir, examId, file)
+  res.sendFile(filePath, { dotfiles: 'allow' }, (error) => {
+    if (error) res.status(404).send('File not found')
+  })
+})
+
 app.get(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/, (req, res) => {
   const [, rawExamId, rawFile] = req.path.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/i) ?? []
   const examId = sanitizePathSegment(rawExamId)
@@ -227,10 +482,12 @@ async function streamTutorTurn(payload, res) {
   })
   res.flushHeaders?.()
 
+  const topicId = safeTopicId(payload.topicId) ?? defaultTopicId
   const sessionId = String(payload.sessionId || payload.question?.id || 'default')
+  const tutorThreadKey = `${topicId}:${sessionId}`
   const isFollowUp = payload.mode === 'chat'
   const isLearningRequest = payload.mode === 'learn'
-  const threadId = await getTutorThread(sessionId)
+  const threadId = await getTutorThread(tutorThreadKey, topicId)
   const prompt = isLearningRequest
     ? buildLearningPrompt(payload)
     : isFollowUp
@@ -362,9 +619,16 @@ function imagePathToInput(rawPath) {
 function resolveLocalImagePath(imagePath) {
   if (path.isAbsolute(imagePath)) return imagePath
   if (/^\/api\/generated-assets\//i.test(imagePath)) {
-    const [, examId, file] = imagePath.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/i) ?? []
-    if (!examId || !file) return null
-    return path.join(generatedAssetsDir, sanitizePathSegment(examId), sanitizePathSegment(file))
+    const [, topicId, examId, topicFile] = imagePath.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)\/([^/]+)$/i) ?? []
+    if (topicId && examId && topicFile) {
+      const topicFilePath = path.join(topicPath(sanitizePathSegment(topicId)), 'generated-assets', sanitizePathSegment(examId), sanitizePathSegment(topicFile))
+      return fs.existsSync(topicFilePath)
+        ? topicFilePath
+        : path.join(generatedAssetsDir, sanitizePathSegment(examId), sanitizePathSegment(topicFile))
+    }
+    const [, legacyExamId, file] = imagePath.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/i) ?? []
+    if (!legacyExamId || !file) return null
+    return path.join(generatedAssetsDir, sanitizePathSegment(legacyExamId), sanitizePathSegment(file))
   }
   if (/^\/generated-assets\//i.test(imagePath)) {
     return path.join(appRoot, 'public', imagePath)
@@ -383,7 +647,7 @@ function decodeImagePath(imagePath) {
   }
 }
 
-async function getTutorThread(sessionId) {
+async function getTutorThread(sessionId, topicId = defaultTopicId) {
   cleanupExpiredTutorThreads()
   const now = Date.now()
   const existing = tutorThreads.get(sessionId)
@@ -397,7 +661,7 @@ async function getTutorThread(sessionId) {
     approvalPolicy: 'never',
     sandbox: 'read-only',
     ephemeral: true,
-    developerInstructions: tutorDeveloperInstructions(),
+    developerInstructions: tutorDeveloperInstructions(topicId),
   })
   const threadId = response.thread.id
   tutorThreads.set(sessionId, { threadId, lastUsedAt: now })
@@ -413,7 +677,7 @@ function cleanupExpiredTutorThreads() {
   }
 }
 
-function tutorDeveloperInstructions() {
+function tutorDeveloperInstructions(topicId = defaultTopicId) {
   return [
     `
 You are Codex acting as the TurboLearner sidebar tutor for machine learning exam prep.
@@ -447,12 +711,13 @@ For follow-up chat, answer the learner's question in Markdown and keep using the
 Before submission, follow the pre-submit hint rules and do not reveal the answer. After submission,
 you may give the correct answer when relevant.
 `.trim(),
-    persistentCourseContextInstructions(),
+    persistentCourseContextInstructions(topicId),
   ].filter(Boolean).join('\n\n')
 }
 
-function persistentCourseContextInstructions() {
-  if (contextState.status !== 'ready' || !contextState.injectedPrompt?.trim()) return ''
+function persistentCourseContextInstructions(topicId = defaultTopicId) {
+  const topicContext = safeTopicId(topicId) ? publicTopicContextState(topicId) : contextState
+  if (topicContext.status !== 'ready' || !topicContext.injectedPrompt?.trim()) return ''
   return `
 ## TurboLearner Persistent Course Context
 
@@ -461,7 +726,7 @@ Use it as the source of truth for what this course covered and at what depth.
 You may use general knowledge to explain listed covered concepts, but align grading and expected
 answers to the listed scope, notation, terminology, framing, and lecture-specific nuances.
 
-${contextState.injectedPrompt.trim()}
+${topicContext.injectedPrompt.trim()}
 `.trim()
 }
 
@@ -847,6 +1112,842 @@ function writeEvent(res, event) {
   res.write(`${JSON.stringify(event)}\n`)
 }
 
+function initializeDatabase() {
+  fs.mkdirSync(contextDir, { recursive: true })
+  const database = new Database(sqlitePath)
+  database.pragma('journal_mode = WAL')
+  database.pragma('foreign_keys = ON')
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS topics (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS topic_sources (
+      id TEXT PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      original_name TEXT NOT NULL,
+      stored_path TEXT NOT NULL,
+      extracted_text_path TEXT,
+      size INTEGER NOT NULL DEFAULT 0,
+      extension TEXT NOT NULL DEFAULT '',
+      extraction_status TEXT NOT NULL DEFAULT 'pending',
+      extraction_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS topic_contexts (
+      topic_id TEXT PRIMARY KEY REFERENCES topics(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      generated_at TEXT,
+      injected_prompt TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      job_id TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS question_sets (
+      id TEXT NOT NULL,
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL,
+      source_path TEXT NOT NULL DEFAULT '',
+      questions_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (topic_id, id)
+    );
+
+    CREATE TABLE IF NOT EXISTS generation_jobs (
+      id TEXT PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      phase TEXT NOT NULL DEFAULT '',
+      log_json TEXT NOT NULL DEFAULT '[]',
+      started_at TEXT,
+      completed_at TEXT,
+      error TEXT,
+      result_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS exam_sessions (
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      set_id TEXT NOT NULL,
+      state_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (topic_id, set_id)
+    );
+  `)
+  seedDefaultTopic(database)
+  return database
+}
+
+function seedDefaultTopic(database) {
+  const now = new Date().toISOString()
+  const hasDefaultTopic = database.prepare('SELECT id FROM topics WHERE id = ?').get(defaultTopicId)
+  if (!hasDefaultTopic) {
+    database.prepare(`
+      INSERT INTO topics (id, name, emoji, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(defaultTopicId, defaultTopicName, defaultTopicEmoji, now, now)
+  }
+
+  const baseBank = readJsonFile(questionBankPath, { schema: null, sets: [] })
+  const generatedBank = loadGeneratedExamBank()
+  const importSet = database.prepare(`
+    INSERT INTO question_sets (
+      id, topic_id, title, description, source_type, source_path, questions_json, created_at, updated_at
+    ) VALUES (
+      @id, @topicId, @title, @description, @sourceType, @sourcePath, @questionsJson, @createdAt, @updatedAt
+    )
+    ON CONFLICT(topic_id, id) DO UPDATE SET
+      title = excluded.title,
+      description = excluded.description,
+      source_type = excluded.source_type,
+      source_path = excluded.source_path,
+      questions_json = excluded.questions_json,
+      updated_at = excluded.updated_at
+  `)
+  const seedSets = database.transaction(() => {
+    for (const set of Array.isArray(baseBank.sets) ? baseBank.sets : []) {
+      importSet.run(questionSetDbParams(defaultTopicId, set, 'static', 'public/questions.json', now))
+    }
+    for (const set of Array.isArray(generatedBank.sets) ? generatedBank.sets : []) {
+      importSet.run(questionSetDbParams(defaultTopicId, set, 'generated', '.turbolearner/generated-exams.json', now))
+    }
+  })
+  seedSets()
+
+  const hasContext = database.prepare('SELECT topic_id FROM topic_contexts WHERE topic_id = ?').get(defaultTopicId)
+  if (!hasContext) {
+    const legacyContext = loadContextState()
+    database.prepare(`
+      INSERT INTO topic_contexts (
+        topic_id, status, generated_at, injected_prompt, error, job_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      defaultTopicId,
+      legacyContext.status,
+      legacyContext.generatedAt,
+      legacyContext.injectedPrompt,
+      legacyContext.error,
+      null,
+      now,
+    )
+  }
+}
+
+function questionSetDbParams(topicId, set, sourceType, sourcePath, timestamp = new Date().toISOString()) {
+  return {
+    id: nonEmptyString(set?.id, stableId(set?.title, randomUUID())),
+    topicId,
+    title: nonEmptyString(set?.title, 'Untitled Exam'),
+    description: typeof set?.description === 'string' ? set.description : '',
+    sourceType,
+    sourcePath,
+    questionsJson: JSON.stringify(Array.isArray(set?.questions) ? set.questions : []),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }
+}
+
+function requireTopicId(value) {
+  const topicId = sanitizePathSegment(value)
+  if (!topicId || !db.prepare('SELECT id FROM topics WHERE id = ?').get(topicId)) {
+    throw new Error('Topic not found.')
+  }
+  return topicId
+}
+
+function safeTopicId(value) {
+  const topicId = sanitizePathSegment(value)
+  if (!topicId) return null
+  return db.prepare('SELECT id FROM topics WHERE id = ?').get(topicId) ? topicId : null
+}
+
+function createTopic({ name, emoji }) {
+  const id = uniqueTopicId(name)
+  const now = new Date().toISOString()
+  db.prepare(`
+    INSERT INTO topics (id, name, emoji, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, name.trim(), emoji.trim(), now, now)
+  upsertTopicContext(id, {
+    status: 'idle',
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+    jobId: null,
+  })
+  fs.mkdirSync(topicPath(id), { recursive: true })
+  return publicTopic(id)
+}
+
+function uniqueTopicId(name) {
+  const base = stableId(name, 'topic')
+  let candidate = base
+  let index = 2
+  while (db.prepare('SELECT id FROM topics WHERE id = ?').get(candidate)) {
+    candidate = `${base}-${index}`
+    index += 1
+  }
+  return candidate
+}
+
+function updateTopic(topicId, patch) {
+  const current = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId)
+  if (!current) throw new Error('Topic not found.')
+  const name = typeof patch.name === 'string' && patch.name.trim() ? patch.name.trim() : current.name
+  const emoji = typeof patch.emoji === 'string' && patch.emoji.trim() ? patch.emoji.trim().slice(0, 8) : current.emoji
+  db.prepare('UPDATE topics SET name = ?, emoji = ?, updated_at = ? WHERE id = ?')
+    .run(name, emoji, new Date().toISOString(), topicId)
+}
+
+function deleteTopic(topicId) {
+  db.prepare('DELETE FROM topics WHERE id = ?').run(topicId)
+}
+
+function listTopics() {
+  return db.prepare('SELECT id FROM topics ORDER BY created_at ASC').all().map((row) => publicTopic(row.id))
+}
+
+function publicTopic(topicId) {
+  const row = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId)
+  if (!row) throw new Error('Topic not found.')
+  const sessionSummaries = Object.values(getTopicSessions(topicId)).map((session) => examSessionSummary(session))
+  const seen = sessionSummaries.reduce((sum, summary) => sum + summary.seen, 0)
+  const last25 = sessionSummaries.flatMap((summary) => summary.last25)
+    .sort((a, b) => Number(b.answeredAt) - Number(a.answeredAt))
+    .slice(0, 25)
+  return {
+    id: row.id,
+    name: row.name,
+    emoji: row.emoji,
+    examCount: db.prepare('SELECT COUNT(*) AS count FROM question_sets WHERE topic_id = ?').get(topicId).count,
+    sourceCount: db.prepare('SELECT COUNT(*) AS count FROM topic_sources WHERE topic_id = ?').get(topicId).count,
+    seen,
+    last25,
+    correctLast25: last25.filter((item) => item.isCorrect).length,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function examSessionSummary(session) {
+  const history = Array.isArray(session?.history) ? session.history : []
+  const progress = session?.progress && typeof session.progress === 'object' ? session.progress : {}
+  return {
+    last25: history.slice(0, 25),
+    seen: Object.keys(progress).length,
+  }
+}
+
+function topicQuestionBank(topicId) {
+  const baseBank = readJsonFile(questionBankPath, { schema: null, generatedAt: null, sets: [] })
+  const baseOrder = new Map((baseBank.sets ?? []).map((set, index) => [set.id, index]))
+  const sets = db.prepare(`
+    SELECT id, title, description, source_type, source_path, questions_json, created_at
+    FROM question_sets
+    WHERE topic_id = ?
+  `).all(topicId)
+    .sort((a, b) => {
+      const typeA = a.source_type === 'static' ? 0 : 1
+      const typeB = b.source_type === 'static' ? 0 : 1
+      if (typeA !== typeB) return typeA - typeB
+      if (typeA === 0) return (baseOrder.get(a.id) ?? 9999) - (baseOrder.get(b.id) ?? 9999)
+      const created = String(a.created_at ?? '').localeCompare(String(b.created_at ?? ''))
+      return created || String(a.title ?? '').localeCompare(String(b.title ?? ''))
+    })
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      sourcePath: row.source_path,
+      questions: parseJson(row.questions_json, []),
+    }))
+  return {
+    schema: baseBank.schema ?? null,
+    generatedAt: new Date().toISOString(),
+    sets,
+  }
+}
+
+function topicQuestionSetIds(topicId) {
+  const ids = new Set(db.prepare('SELECT id FROM question_sets WHERE topic_id = ?').all(topicId).map((row) => row.id))
+  if (ids.size > 0) ids.add('all-questions')
+  return ids
+}
+
+function getQuestionSet(topicId, setId) {
+  if (setId === 'all-questions') {
+    const sets = topicQuestionBank(topicId).sets
+    const questions = sets.flatMap((set) => set.questions)
+    return {
+      id: 'all-questions',
+      title: 'All Questions',
+      description: 'Practice and last year exam questions mixed together.',
+      questions,
+    }
+  }
+  const row = db.prepare(`
+    SELECT id, title, description, source_path, questions_json
+    FROM question_sets
+    WHERE topic_id = ? AND id = ?
+  `).get(topicId, setId)
+  if (!row) return null
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    sourcePath: row.source_path,
+    questions: parseJson(row.questions_json, []),
+  }
+}
+
+function persistGeneratedExamSetForTopic(topicId, set) {
+  const now = new Date().toISOString()
+  db.prepare(`
+    INSERT INTO question_sets (
+      id, topic_id, title, description, source_type, source_path, questions_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(topic_id, id) DO UPDATE SET
+      title = excluded.title,
+      description = excluded.description,
+      questions_json = excluded.questions_json,
+      updated_at = excluded.updated_at
+  `).run(
+    set.id,
+    topicId,
+    set.title,
+    set.description ?? '',
+    'generated',
+    `.turbolearner/topics/${topicId}/generated-assets/${set.id}`,
+    JSON.stringify(set.questions ?? []),
+    now,
+    now,
+  )
+}
+
+function listTopicSources(topicId) {
+  return db.prepare(`
+    SELECT *
+    FROM topic_sources
+    WHERE topic_id = ?
+    ORDER BY created_at ASC
+  `).all(topicId).map(publicTopicSource)
+}
+
+function publicTopicSource(row) {
+  return {
+    id: row.id,
+    name: row.original_name,
+    size: Number(row.size) || 0,
+    extension: row.extension,
+    extractionStatus: row.extraction_status,
+    extractionError: row.extraction_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+async function migrateLegacyContextSourcesForDefaultTopic() {
+  const existingSourceCount = db.prepare('SELECT COUNT(*) AS count FROM topic_sources WHERE topic_id = ?').get(defaultTopicId).count
+  if (existingSourceCount > 0 || contextState.status !== 'ready' || !Array.isArray(contextState.files) || contextState.files.length === 0) {
+    return
+  }
+
+  const sourceDir = path.join(topicPath(defaultTopicId), 'sources')
+  const extractedDir = path.join(topicPath(defaultTopicId), 'extracted')
+  await fs.promises.mkdir(sourceDir, { recursive: true })
+  await fs.promises.mkdir(extractedDir, { recursive: true })
+
+  const rows = []
+  for (const file of contextState.files.map(publicContextFile)) {
+    const extension = String(file.extension || path.extname(file.name)).toLowerCase()
+    const sourceId = randomUUID()
+    const now = contextState.generatedAt || new Date().toISOString()
+    const legacyPath = findLegacyContextUpload(file)
+    const base = uploadSafeBasename(file.name, extension)
+    const storedPath = path.join(sourceDir, `${sourceId}-${base}${extension}`)
+    const extractedTextPath = path.join(extractedDir, `${sourceId}.txt`)
+
+    let status = 'ready'
+    let error = null
+    let finalStoredPath = storedPath
+    if (!legacyPath) {
+      status = 'error'
+      error = 'Legacy upload file was not found.'
+      finalStoredPath = ''
+    } else {
+      await fs.promises.copyFile(legacyPath, storedPath)
+      const extracted = await extractContextFile({
+        originalName: file.name,
+        path: storedPath,
+        size: file.size,
+        mimetype: extension === '.pdf' ? 'application/pdf' : 'text/plain',
+        extension,
+      })
+      if (!extracted.text.trim()) {
+        status = 'error'
+        error = extracted.error || 'No text was extracted.'
+      } else {
+        await fs.promises.writeFile(extractedTextPath, extracted.text, 'utf8')
+      }
+    }
+
+    rows.push({
+      id: sourceId,
+      topicId: defaultTopicId,
+      originalName: file.name,
+      storedPath: finalStoredPath,
+      extractedTextPath: status === 'ready' ? extractedTextPath : null,
+      size: file.size,
+      extension,
+      status,
+      error,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+
+  const insert = db.prepare(`
+    INSERT INTO topic_sources (
+      id, topic_id, original_name, stored_path, extracted_text_path, size, extension,
+      extraction_status, extraction_error, created_at, updated_at
+    ) VALUES (
+      @id, @topicId, @originalName, @storedPath, @extractedTextPath, @size, @extension,
+      @status, @error, @createdAt, @updatedAt
+    )
+  `)
+  db.transaction((sourceRows) => {
+    for (const row of sourceRows) insert.run(row)
+  })(rows)
+  upsertTopicContext(defaultTopicId, {
+    status: contextState.status,
+    generatedAt: contextState.generatedAt,
+    injectedPrompt: contextState.injectedPrompt,
+    error: contextState.error,
+    jobId: null,
+  })
+}
+
+function findLegacyContextUpload(file) {
+  if (!fs.existsSync(contextUploadsDir)) return null
+  const extension = String(file.extension || path.extname(file.name)).toLowerCase()
+  const expectedSuffix = `-${uploadSafeBasename(file.name, extension)}${extension}`
+  const candidates = fs.readdirSync(contextUploadsDir)
+    .filter((entry) => entry.endsWith(expectedSuffix))
+    .map((entry) => {
+      const filePath = path.join(contextUploadsDir, entry)
+      const stats = fs.statSync(filePath)
+      return { filePath, mtimeMs: stats.mtimeMs, size: stats.size }
+    })
+    .filter((candidate) => !file.size || candidate.size === file.size)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  return candidates[0]?.filePath ?? null
+}
+
+function uploadSafeBasename(name, extension = path.extname(name).toLowerCase()) {
+  return path.basename(name, extension).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'file'
+}
+
+async function storeTopicSourceUpload(topicId, file) {
+  const extension = path.extname(file.originalname).toLowerCase()
+  const sourceId = randomUUID()
+  const now = new Date().toISOString()
+  const sourceDir = path.join(topicPath(topicId), 'sources')
+  const extractedDir = path.join(topicPath(topicId), 'extracted')
+  fs.mkdirSync(sourceDir, { recursive: true })
+  fs.mkdirSync(extractedDir, { recursive: true })
+  const base = uploadSafeBasename(file.originalname, extension)
+  const storedPath = path.join(sourceDir, `${sourceId}-${base}${extension}`)
+  const extractedTextPath = path.join(extractedDir, `${sourceId}.txt`)
+  await fs.promises.writeFile(storedPath, file.buffer)
+
+  let status = 'ready'
+  let error = null
+  try {
+    const extracted = await extractContextFile({
+      originalName: file.originalname,
+      path: storedPath,
+      size: file.size,
+      mimetype: file.mimetype,
+      extension,
+    })
+    if (!extracted.text.trim()) {
+      status = 'error'
+      error = extracted.error || 'No text was extracted.'
+    } else {
+      await fs.promises.writeFile(extractedTextPath, extracted.text, 'utf8')
+    }
+  } catch (extractError) {
+    status = 'error'
+    error = extractError instanceof Error ? extractError.message : String(extractError)
+  }
+
+  db.prepare(`
+    INSERT INTO topic_sources (
+      id, topic_id, original_name, stored_path, extracted_text_path, size, extension,
+      extraction_status, extraction_error, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    sourceId,
+    topicId,
+    file.originalname,
+    storedPath,
+    status === 'ready' ? extractedTextPath : null,
+    file.size,
+    extension,
+    status,
+    error,
+    now,
+    now,
+  )
+  upsertTopicContext(topicId, {
+    status: 'idle',
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+    jobId: null,
+  })
+}
+
+function deleteTopicSource(topicId, sourceId) {
+  const row = db.prepare('SELECT * FROM topic_sources WHERE topic_id = ? AND id = ?').get(topicId, sourceId)
+  if (!row) throw new Error('Source not found.')
+  for (const filePath of [row.stored_path, row.extracted_text_path]) {
+    if (filePath && fs.existsSync(filePath)) fs.rmSync(filePath, { force: true })
+  }
+  db.prepare('DELETE FROM topic_sources WHERE topic_id = ? AND id = ?').run(topicId, sourceId)
+  upsertTopicContext(topicId, {
+    status: 'idle',
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+    jobId: null,
+  })
+}
+
+function queueTopicContextRefresh(topicId) {
+  topicContextJobs.set(topicId, randomUUID())
+  if (listTopicSources(topicId).length === 0) {
+    upsertTopicContext(topicId, {
+      status: 'idle',
+      generatedAt: null,
+      injectedPrompt: '',
+      error: null,
+      jobId: null,
+    })
+    tutorThreads.clear()
+    return
+  }
+
+  const jobId = randomUUID()
+  topicContextJobs.set(topicId, jobId)
+  upsertTopicContext(topicId, {
+    status: 'processing',
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+    jobId,
+  })
+  tutorThreads.clear()
+  void generatePersistentContextForTopic(topicId, jobId)
+}
+
+function topicSourceFiles(topicId) {
+  return db.prepare(`
+    SELECT *
+    FROM topic_sources
+    WHERE topic_id = ? AND extraction_status = 'ready' AND extracted_text_path IS NOT NULL
+    ORDER BY created_at ASC
+  `).all(topicId).map((row) => ({
+    name: row.original_name,
+    text: fs.existsSync(row.extracted_text_path) ? fs.readFileSync(row.extracted_text_path, 'utf8') : '',
+    error: null,
+  })).filter((file) => file.text.trim())
+}
+
+function topicFailedSourceFiles(topicId) {
+  return db.prepare(`
+    SELECT *
+    FROM topic_sources
+    WHERE topic_id = ? AND extraction_status = 'error'
+    ORDER BY created_at ASC
+  `).all(topicId).map((row) => ({
+    name: row.original_name,
+    text: '',
+    error: row.extraction_error || 'Extraction failed.',
+  }))
+}
+
+function upsertTopicContext(topicId, { status, generatedAt, injectedPrompt, error, jobId }) {
+  const now = new Date().toISOString()
+  db.prepare(`
+    INSERT INTO topic_contexts (
+      topic_id, status, generated_at, injected_prompt, error, job_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(topic_id) DO UPDATE SET
+      status = excluded.status,
+      generated_at = excluded.generated_at,
+      injected_prompt = excluded.injected_prompt,
+      error = excluded.error,
+      job_id = excluded.job_id,
+      updated_at = excluded.updated_at
+  `).run(topicId, status, generatedAt, injectedPrompt ?? '', error, jobId, now)
+}
+
+function getTopicContext(topicId) {
+  const row = db.prepare('SELECT * FROM topic_contexts WHERE topic_id = ?').get(topicId)
+  if (row) return row
+  upsertTopicContext(topicId, {
+    status: 'idle',
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+    jobId: null,
+  })
+  return db.prepare('SELECT * FROM topic_contexts WHERE topic_id = ?').get(topicId)
+}
+
+function publicTopicContextState(topicId) {
+  const context = getTopicContext(topicId)
+  const files = listTopicSources(topicId).map((source) => ({
+    name: source.name,
+    size: source.size,
+    extension: source.extension,
+  }))
+  return {
+    status: context.status,
+    fileCount: files.length,
+    files,
+    generatedAt: context.generated_at ?? null,
+    injectedPrompt: context.injected_prompt ?? '',
+    error: context.error ?? null,
+  }
+}
+
+function legacyContextFilesForTopic(topicId) {
+  if (topicId !== defaultTopicId) return []
+  const legacyContext = loadContextState()
+  if (legacyContext.status !== 'ready' || !Array.isArray(legacyContext.files)) return []
+  return legacyContext.files.map((file) => ({
+    name: String(file?.name ?? 'Lecture file'),
+    size: Number(file?.size) || 0,
+    extension: String(file?.extension ?? path.extname(file?.name ?? '').toLowerCase()),
+  }))
+}
+
+function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt, completedAt, error, resultId }) {
+  db.prepare(`
+    INSERT INTO generation_jobs (
+      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      phase = excluded.phase,
+      log_json = excluded.log_json,
+      completed_at = excluded.completed_at,
+      error = excluded.error,
+      result_id = excluded.result_id
+  `).run(
+    id,
+    topicId,
+    type,
+    status,
+    phase ?? '',
+    JSON.stringify(normalizeExamGenerationLog(log)),
+    startedAt,
+    completedAt,
+    error,
+    resultId,
+  )
+}
+
+function getActiveGenerationJob(topicId, type) {
+  const row = db.prepare(`
+    SELECT *
+    FROM generation_jobs
+    WHERE topic_id = ? AND type = ?
+    ORDER BY COALESCE(started_at, '') DESC, id DESC
+    LIMIT 1
+  `).get(topicId, type)
+  if (!row) return null
+  return {
+    id: row.id,
+    topicId: row.topic_id,
+    type: row.type,
+    status: row.status,
+    phase: row.phase,
+    log: normalizeExamGenerationLog(parseJson(row.log_json, [])),
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    error: row.error,
+    resultId: row.result_id,
+  }
+}
+
+function deleteActiveGenerationJob(topicId, type) {
+  const job = getActiveGenerationJob(topicId, type)
+  if (job) db.prepare('DELETE FROM generation_jobs WHERE id = ?').run(job.id)
+}
+
+function publicTopicExamGenerationState(topicId) {
+  const job = getActiveGenerationJob(topicId, 'exam')
+  if (!job) return emptyExamGenerationState()
+  const set = job.resultId ? getQuestionSet(topicId, job.resultId) : null
+  return {
+    status: job.status,
+    phase: job.phase || '',
+    fileCount: listTopicSources(topicId).length,
+    files: listTopicSources(topicId).map(({ name, size, extension }) => ({ name, size, extension })),
+    startedAt: job.startedAt ?? null,
+    completedAt: job.completedAt ?? null,
+    threadId: null,
+    generatedExamId: job.resultId ?? null,
+    generatedExamTitle: set?.title ?? null,
+    questionCount: set?.questions?.length ?? 0,
+    log: normalizeExamGenerationLog(job.log),
+    error: job.error ?? null,
+  }
+}
+
+function setTopicExamGenerationPhase(topicId, jobId, phase) {
+  if (topicExamGenerationJobs.get(topicId) !== jobId) return
+  const job = getActiveGenerationJob(topicId, 'exam')
+  if (!job) return
+  upsertGenerationJob({ ...job, status: 'processing', phase, log: [...job.log, examGenerationLogEntry('status', phase)] })
+}
+
+function appendTopicExamGenerationLog(topicId, jobId, kind, message, detail = '') {
+  if (topicExamGenerationJobs.get(topicId) !== jobId) return
+  const text = String(message || '').trim()
+  if (!text) return
+  const job = getActiveGenerationJob(topicId, 'exam')
+  if (!job) return
+  upsertGenerationJob({
+    ...job,
+    log: [...job.log, examGenerationLogEntry(kind, text, detail)].slice(-400),
+  })
+}
+
+function completeTopicExamGenerationJob(topicId, jobId, patch) {
+  if (topicExamGenerationJobs.get(topicId) !== jobId) return
+  const job = getActiveGenerationJob(topicId, 'exam')
+  if (!job) return
+  upsertGenerationJob({
+    ...job,
+    ...patch,
+    completedAt: patch.completedAt ?? new Date().toISOString(),
+  })
+}
+
+function getTopicSessions(topicId) {
+  return Object.fromEntries(
+    db.prepare('SELECT set_id, state_json FROM exam_sessions WHERE topic_id = ?').all(topicId)
+      .map((row) => [row.set_id, parseJson(row.state_json, null)])
+      .filter(([, session]) => session && typeof session === 'object'),
+  )
+}
+
+function saveTopicSession(topicId, setId, session) {
+  db.prepare(`
+    INSERT INTO exam_sessions (topic_id, set_id, state_json, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(topic_id, set_id) DO UPDATE SET
+      state_json = excluded.state_json,
+      updated_at = excluded.updated_at
+  `).run(topicId, setId, JSON.stringify(session), new Date().toISOString())
+}
+
+function importLocalStorageSessions(topicId, sessions, activeSetId) {
+  if (!sessions || typeof sessions !== 'object' || Array.isArray(sessions)) {
+    return { imported: 0, skipped: 0, activeSetId: null }
+  }
+  let imported = 0
+  let skipped = 0
+  let nextActiveSetId = null
+  const validSetIds = topicQuestionSetIds(topicId)
+  for (const [setId, session] of Object.entries(sessions)) {
+    if (!validSetIds.has(setId)) {
+      skipped += 1
+      continue
+    }
+    const sanitized = sanitizeExamSessionForSet(topicId, setId, session)
+    if (!sanitized) {
+      skipped += 1
+      continue
+    }
+    saveTopicSession(topicId, setId, sanitized)
+    imported += 1
+    if (setId === activeSetId) nextActiveSetId = setId
+  }
+  return { imported, skipped, activeSetId: nextActiveSetId }
+}
+
+function sanitizeExamSessionForSet(topicId, setId, session) {
+  if (!session || typeof session !== 'object' || Array.isArray(session)) return null
+  const set = getQuestionSet(topicId, setId)
+  if (!set) return null
+  const unitIds = questionUnitIds(set.questions)
+  const questionIds = new Set(set.questions.map((question) => question.id))
+  const currentId = typeof session.currentId === 'string' && unitIds.has(session.currentId)
+    ? session.currentId
+    : unitIds.values().next().value ?? null
+  return {
+    currentId,
+    questionQueue: Array.isArray(session.questionQueue)
+      ? session.questionQueue.filter((id) => typeof id === 'string' && unitIds.has(id) && id !== currentId)
+      : [],
+    answersByQuestion: filterObjectByKeys(session.answersByQuestion, questionIds),
+    result: session.result && typeof session.result === 'object' ? session.result : null,
+    isAnswerKeyRevealed: Boolean(session.isAnswerKeyRevealed),
+    revealedCorrectOptionIdsByQuestion: filterObjectByKeys(session.revealedCorrectOptionIdsByQuestion, questionIds),
+    messages: Array.isArray(session.messages) ? session.messages.filter((message) => message && typeof message === 'object') : [],
+    tutorSessionId: typeof session.tutorSessionId === 'string' && session.tutorSessionId.trim() ? session.tutorSessionId : randomUUID(),
+    optionOrderSeed: typeof session.optionOrderSeed === 'string' && session.optionOrderSeed.trim() ? session.optionOrderSeed : randomUUID(),
+    usedLearningBeforeAnswer: Boolean(session.usedLearningBeforeAnswer),
+    progress: filterObjectByKeys(session.progress, questionIds),
+    history: Array.isArray(session.history)
+      ? session.history.filter((item) => item && typeof item === 'object' && typeof item.questionId === 'string')
+      : [],
+  }
+}
+
+function questionUnitIds(questions) {
+  const ids = new Set()
+  const groupIds = new Set()
+  for (const question of questions) {
+    if (question?.groupId) groupIds.add(question.groupId)
+    else if (question?.id) ids.add(question.id)
+  }
+  for (const id of groupIds) ids.add(id)
+  return ids
+}
+
+function filterObjectByKeys(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value).filter(([key]) => keys.has(key)))
+}
+
+function topicPath(topicId) {
+  return path.join(topicsDir, sanitizePathSegment(topicId))
+}
+
+function parseJson(value, fallback) {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return fallback
+  }
+}
+
 function emptyContextState() {
   return {
     status: 'idle',
@@ -1129,7 +2230,99 @@ async function generatePersistentExam(jobId, files) {
   }
 }
 
-async function generateExamWithCodex(jobId, { examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
+async function generatePersistentContextForTopic(topicId, jobId) {
+  try {
+    const usableFiles = topicSourceFiles(topicId)
+    const failedFiles = topicFailedSourceFiles(topicId)
+    if (usableFiles.length === 0) {
+      throw new Error([
+        'No usable text could be extracted from this topic source list.',
+        ...failedFiles.map((file) => `${file.name}: ${file.error}`),
+      ].filter(Boolean).join('\n'))
+    }
+
+    const injectedPrompt = await summarizeCourseContextWithCodex(usableFiles, failedFiles)
+    if (topicContextJobs.get(topicId) !== jobId) return
+
+    upsertTopicContext(topicId, {
+      status: 'ready',
+      generatedAt: new Date().toISOString(),
+      injectedPrompt,
+      error: failedFiles.length > 0
+        ? `Skipped ${failedFiles.length} source${failedFiles.length === 1 ? '' : 's'} with extraction errors.`
+        : null,
+      jobId,
+    })
+    tutorThreads.clear()
+  } catch (error) {
+    if (topicContextJobs.get(topicId) !== jobId) return
+    upsertTopicContext(topicId, {
+      status: 'error',
+      generatedAt: null,
+      injectedPrompt: '',
+      error: error instanceof Error ? error.message : String(error),
+      jobId,
+    })
+  }
+}
+
+async function generatePersistentExamForTopic(topicId, jobId) {
+  const examId = `generated-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`
+  const examAssetDir = path.join(topicPath(topicId), 'generated-assets', examId)
+  try {
+    setTopicExamGenerationPhase(topicId, jobId, 'Reading topic lecture sources')
+    const usableFiles = topicSourceFiles(topicId)
+    const failedFiles = topicFailedSourceFiles(topicId)
+    if (topicExamGenerationJobs.get(topicId) !== jobId) return
+    if (usableFiles.length === 0) {
+      throw new Error([
+        'No usable extracted lecture text exists for this topic.',
+        ...failedFiles.map((file) => `${file.name}: ${file.error}`),
+      ].filter(Boolean).join('\n'))
+    }
+
+    fs.mkdirSync(examAssetDir, { recursive: true })
+    const baseBank = topicQuestionBank(topicId)
+    setTopicExamGenerationPhase(topicId, jobId, 'Starting Codex generation thread')
+    const generatedMarkdown = await generateExamWithCodex(jobId, {
+      topicId,
+      examId,
+      examAssetDir,
+      usableFiles,
+      failedFiles,
+      baseBank,
+    })
+    if (topicExamGenerationJobs.get(topicId) !== jobId) return
+
+    setTopicExamGenerationPhase(topicId, jobId, 'Validating generated exam')
+    const rawSet = extractGeneratedQuestionSet(generatedMarkdown)
+    const normalizedSet = normalizeGeneratedQuestionSet(rawSet, examId, topicId)
+    validateGeneratedExamAssets(normalizedSet, examId, topicId)
+    persistGeneratedExamSetForTopic(topicId, normalizedSet)
+
+    completeTopicExamGenerationJob(topicId, jobId, {
+      status: 'ready',
+      phase: 'Generated exam ready',
+      completedAt: new Date().toISOString(),
+      error: failedFiles.length > 0
+        ? `Skipped ${failedFiles.length} source${failedFiles.length === 1 ? '' : 's'} with extraction errors.`
+        : null,
+      resultId: normalizedSet.id,
+    })
+    appendTopicExamGenerationLog(topicId, jobId, 'status', `Generated "${normalizedSet.title}" with ${normalizedSet.questions.length} questions.`)
+  } catch (error) {
+    if (topicExamGenerationJobs.get(topicId) !== jobId) return
+    completeTopicExamGenerationJob(topicId, jobId, {
+      status: 'error',
+      phase: 'Generation failed',
+      completedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    })
+    appendTopicExamGenerationLog(topicId, jobId, 'error', error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function generateExamWithCodex(jobId, { topicId = null, examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
   const thread = await codex.request('thread/start', {
     cwd: appRoot,
     approvalPolicy: 'never',
@@ -1143,18 +2336,21 @@ You may run local commands to inspect/copy generated images and verify generated
 Return the final question set JSON in one fenced json block after any work is complete.
 `.trim(),
   })
-  if (jobId !== examGenerationJobId) return ''
-  examGenerationState = {
-    ...examGenerationState,
-    threadId: thread.thread.id,
+  if (!isExamJobCurrent(topicId, jobId)) return ''
+  if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'status', `Codex thread: ${thread.thread.id}`)
+  else {
+    examGenerationState = {
+      ...examGenerationState,
+      threadId: thread.thread.id,
+    }
+    persistExamGenerationState()
+    appendExamGenerationLog(jobId, 'status', `Codex thread: ${thread.thread.id}`)
   }
-  persistExamGenerationState()
-  appendExamGenerationLog(jobId, 'status', `Codex thread: ${thread.thread.id}`)
 
   let markdown = ''
   await codex.startTurn({
     threadId: thread.thread.id,
-    input: [{ type: 'text', text: buildExamGenerationPrompt({ examId, examAssetDir, usableFiles, failedFiles, baseBank }), text_elements: [] }],
+    input: [{ type: 'text', text: buildExamGenerationPrompt({ topicId, examId, examAssetDir, usableFiles, failedFiles, baseBank }), text_elements: [] }],
     cwd: appRoot,
     approvalPolicy: 'never',
     sandboxPolicy: { type: 'workspaceWrite', networkAccess: false },
@@ -1163,13 +2359,16 @@ Return the final question set JSON in one fenced json block after any work is co
       if (message.method === 'item/agentMessage/delta') {
         const delta = message.params?.delta ?? ''
         markdown += delta
-        appendExamGenerationLog(jobId, 'assistant', delta)
+        if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'assistant', delta)
+        else appendExamGenerationLog(jobId, 'assistant', delta)
       }
       if (message.method === 'item/started') {
-        appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
+        if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
+        else appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
       }
       if (message.method === 'item/completed') {
-        appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
+        if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
+        else appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
       }
     },
   })
@@ -1177,6 +2376,11 @@ Return the final question set JSON in one fenced json block after any work is co
   const finalMarkdown = markdown.trim()
   if (!finalMarkdown) throw new Error('Codex generated an empty exam response.')
   return finalMarkdown
+}
+
+function isExamJobCurrent(topicId, jobId) {
+  if (topicId) return topicExamGenerationJobs.get(topicId) === jobId
+  return jobId === examGenerationJobId
 }
 
 function summarizeCodexItem(item, prefix) {
@@ -1194,7 +2398,7 @@ function summarizeCodexItemDetail(item) {
   return parts.filter(Boolean).join(' · ')
 }
 
-function buildExamGenerationPrompt({ examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
+function buildExamGenerationPrompt({ topicId = null, examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
   const styleBank = {
     schema: baseBank.schema,
     sets: (baseBank.sets ?? []).map((set) => ({
@@ -1207,13 +2411,16 @@ function buildExamGenerationPrompt({ examId, examAssetDir, usableFiles, failedFi
   const extractionNotes = failedFiles.length > 0
     ? failedFiles.map((file) => `- ${file.name}: ${file.error}`).join('\n')
     : 'none'
+  const imageUrlPrefix = topicId
+    ? `/api/generated-assets/${topicId}/${examId}/`
+    : `/api/generated-assets/${examId}/`
 
   return `
 Generate one new TurboLearner exam question set.
 
 Exam id to use exactly: ${examId}
 Asset directory for any generated PNG/JPEG images: ${examAssetDir}
-Image URL prefix for generated images: /api/generated-assets/${examId}/
+Image URL prefix for generated images: ${imageUrlPrefix}
 
 Output contract:
 - Return exactly one JSON object for a TurboLearner question set, not a full bank.
@@ -1243,7 +2450,7 @@ Image requirements:
 - Do not use Matplotlib for generated exam images unless imagegen is unavailable and the question would otherwise have to be dropped.
 - After imagegen creates an image under $CODEX_HOME/generated_images, copy the selected output into the asset directory.
 - Use local shell commands only to create directories, copy imagegen output, inspect files, and verify that referenced PNG/JPEG assets exist.
-- Reference images in prompts as <image>/api/generated-assets/${examId}/filename.png</image>.
+- Reference images in prompts as <image>${imageUrlPrefix}filename.png</image>.
 - Include the same URL in imagePaths.
 - Filenames must not reveal the answer.
 
@@ -1291,7 +2498,7 @@ function extractGeneratedQuestionSet(markdown) {
   }
 }
 
-function normalizeGeneratedQuestionSet(rawSet, examId) {
+function normalizeGeneratedQuestionSet(rawSet, examId, topicId = null) {
   if (!rawSet || typeof rawSet !== 'object') throw new Error('Generated exam is not an object.')
   const questions = Array.isArray(rawSet.questions) ? rawSet.questions : []
   if (questions.length === 0) throw new Error('Generated exam contains no questions.')
@@ -1300,7 +2507,9 @@ function normalizeGeneratedQuestionSet(rawSet, examId) {
     id: examId,
     title: nonEmptyString(rawSet.title, 'Generated Exam'),
     description: nonEmptyString(rawSet.description, 'Codex-generated practice exam.'),
-    sourcePath: '.turbolearner/generated-exams.json',
+    sourcePath: topicId
+      ? `.turbolearner/topics/${topicId}/generated-assets/${examId}`
+      : '.turbolearner/generated-exams.json',
     questions: questions.map((question, index) => normalizeGeneratedQuestion(question, examId, index)),
   }
   validateQuestionSetShape(set)
@@ -1405,8 +2614,10 @@ function isBinaryChoiceOptions(options) {
   )
 }
 
-function validateGeneratedExamAssets(set, examId) {
-  const expectedPrefix = `/api/generated-assets/${examId}/`
+function validateGeneratedExamAssets(set, examId, topicId = null) {
+  const expectedPrefix = topicId
+    ? `/api/generated-assets/${topicId}/${examId}/`
+    : `/api/generated-assets/${examId}/`
   for (const question of set.questions) {
     const paths = [
       ...extractImageTags(question.prompt),
@@ -1416,7 +2627,9 @@ function validateGeneratedExamAssets(set, examId) {
     for (const imagePath of paths) {
       if (!imagePath.startsWith(expectedPrefix)) continue
       const file = sanitizePathSegment(imagePath.slice(expectedPrefix.length))
-      const diskPath = path.join(generatedAssetsDir, examId, file)
+      const diskPath = topicId
+        ? path.join(topicPath(topicId), 'generated-assets', examId, file)
+        : path.join(generatedAssetsDir, examId, file)
       if (!/\.(png|jpe?g)$/i.test(file)) throw new Error(`${question.id} references a non-PNG/JPEG generated image.`)
       if (!fs.existsSync(diskPath)) throw new Error(`${question.id} references missing generated image: ${imagePath}`)
     }
