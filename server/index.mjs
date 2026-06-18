@@ -1,6 +1,7 @@
 import cors from 'cors'
 import express from 'express'
 import fs from 'node:fs'
+import multer from 'multer'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -12,17 +13,82 @@ const app = express()
 const port = Number(process.env.TURBOLEARNER_API_PORT || 8787)
 const codexRequestTimeoutMs = Number(process.env.TURBOLEARNER_CODEX_REQUEST_TIMEOUT_MS || 30_000)
 const codexTurnTimeoutMs = Number(process.env.TURBOLEARNER_CODEX_TURN_TIMEOUT_MS || 90_000)
+const contextGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_CONTEXT_TURN_TIMEOUT_MS || 10 * 60 * 1000)
 const tutorThreadTtlMs = Number(process.env.TURBOLEARNER_TUTOR_THREAD_TTL_MS || 30 * 60 * 1000)
 const tutorThreadCleanupIntervalMs = Math.min(tutorThreadTtlMs, 5 * 60 * 1000)
+const contextDir = path.join(appRoot, '.turbolearner')
+const contextUploadsDir = path.join(contextDir, 'uploads')
+const contextStatePath = path.join(contextDir, 'context.json')
+const textFileExtensions = new Set(['.txt', '.md', '.csv', '.json', '.log'])
+const acceptedContextExtensions = new Set(['.pdf', ...textFileExtensions])
 
 const tutorThreads = new Map()
+let contextState = loadContextState()
+let contextJobId = 0
 let codex
+
+fs.mkdirSync(contextUploadsDir, { recursive: true })
 
 app.use(cors())
 app.use(express.json({ limit: '1mb' }))
 
+const uploadContextFiles = multer({
+  storage: multer.diskStorage({
+    destination: contextUploadsDir,
+    filename: (_req, file, cb) => {
+      const extension = path.extname(file.originalname).toLowerCase()
+      const base = path.basename(file.originalname, extension).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'file'
+      cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}-${base}${extension}`)
+    },
+  }),
+  limits: {
+    files: 24,
+    fileSize: 100 * 1024 * 1024,
+  },
+})
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, codex: 'app-server', port })
+})
+
+app.get('/api/context', (_req, res) => {
+  res.json(publicContextState())
+})
+
+app.post('/api/context/files', uploadContextFiles.array('files', 24), (req, res) => {
+  const files = Array.isArray(req.files) ? req.files : []
+  if (files.length === 0) {
+    res.status(400).json({ error: 'No files uploaded.' })
+    return
+  }
+
+  const jobId = ++contextJobId
+  const uploadedFiles = files.map((file) => ({
+    originalName: file.originalname,
+    path: file.path,
+    size: file.size,
+    mimetype: file.mimetype,
+    extension: path.extname(file.originalname).toLowerCase(),
+  }))
+  contextState = {
+    status: 'processing',
+    fileCount: uploadedFiles.length,
+    files: uploadedFiles.map(({ originalName, size, extension }) => ({ name: originalName, size, extension })),
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+  }
+  persistContextState()
+  void generatePersistentContext(jobId, uploadedFiles)
+  res.status(202).json(publicContextState())
+})
+
+app.delete('/api/context', (_req, res) => {
+  contextJobId += 1
+  contextState = emptyContextState()
+  persistContextState()
+  tutorThreads.clear()
+  res.json(publicContextState())
 })
 
 app.get('/api/file', (req, res) => {
@@ -246,7 +312,8 @@ function cleanupExpiredTutorThreads() {
 }
 
 function tutorDeveloperInstructions() {
-  return `
+  return [
+    `
 You are Codex acting as the TurboLearner sidebar tutor for machine learning exam prep.
 
 Do not edit files, run commands, or browse. Stay in teaching mode.
@@ -264,9 +331,9 @@ grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Shor
 For grouped questions, include child question scores when possible:
 grade({"isCorrect":true,"score":0.9,"verdict":"Short verdict","nextPrompt":"Short follow-up question","questionScores":{"question-id":1},"questionCorrectness":{"question-id":true}})
 
-For multiple-choice questions when you know the correct canonical option id or ids, include a final hidden
+For every multiple-choice response that identifies any correct/accepted option, include a final hidden
 answer key line immediately before grade, or as the final line when grade is not used. Use option.id,
-not option.visibleLabel, in answerKey:
+not option.visibleLabel, in answerKey. If multiple options are true or accepted, include all of them:
 answerKey({"correctOptionIds":["opt_example1","opt_example2"]})
 For grouped questions, key answers by child question id:
 answerKey({"correctOptionIdsByQuestion":{"question-id-1":["opt_example3"],"question-id-2":["opt_example4","opt_example5"]}})
@@ -277,6 +344,22 @@ The grade and answerKey lines are tool calls for the app, not learner-facing pro
 For follow-up chat, answer the learner's question in Markdown and keep using the same tutoring style.
 Before submission, follow the pre-submit hint rules and do not reveal the answer. After submission,
 you may give the correct answer when relevant.
+`.trim(),
+    persistentCourseContextInstructions(),
+  ].filter(Boolean).join('\n\n')
+}
+
+function persistentCourseContextInstructions() {
+  if (contextState.status !== 'ready' || !contextState.injectedPrompt?.trim()) return ''
+  return `
+## TurboLearner Persistent Course Context
+
+The following course scope was generated from learner-selected lecture files and is persistent.
+Use it as the source of truth for what this course covered and at what depth.
+You may use general knowledge to explain listed covered concepts, but align grading and expected
+answers to the listed scope, notation, terminology, framing, and lecture-specific nuances.
+
+${contextState.injectedPrompt.trim()}
 `.trim()
 }
 
@@ -299,6 +382,7 @@ Rules:
 - For multiple-choice questions, compare selected option ids/text against the correct answer if present. Option id is the canonical answer identity; visibleLabel is only the shuffled label shown to the learner.
 - Prefer question.answer.correctOptionIds or question.answer.expectedText when present. If those are missing, use legacy question.correctOptionIds if present.
 - If no official answer is present, infer the answer from the concept and say that you inferred it.
+- For every multiple-choice grading response, emit answerKey with all canonical option.id values you accept as correct. If the question is flawed and multiple options are true, include every accepted true option in answerKey.
 - Do not only tell the learner whether they are correct. Give the correct answer, explain the concept, and connect related concepts.
 - For every open question, include a "Model answer" section even when the learner is correct. Put the model answer itself in a Markdown blockquote. Make it concise, exam-ready, and phrased the way a strong university answer should be written.
 - For grouped questions with open child questions, include a separate model answer blockquote for each open child question under that child's feedback.
@@ -661,6 +745,297 @@ function writeEvent(res, event) {
   res.write(`${JSON.stringify(event)}\n`)
 }
 
+function emptyContextState() {
+  return {
+    status: 'idle',
+    fileCount: 0,
+    files: [],
+    generatedAt: null,
+    injectedPrompt: '',
+    error: null,
+  }
+}
+
+function loadContextState() {
+  try {
+    const rawState = JSON.parse(fs.readFileSync(contextStatePath, 'utf8'))
+    if (rawState?.status === 'ready' && typeof rawState.injectedPrompt === 'string') {
+      return {
+        status: 'ready',
+        fileCount: Number(rawState.fileCount) || 0,
+        files: Array.isArray(rawState.files) ? rawState.files.map(publicContextFile) : [],
+        generatedAt: typeof rawState.generatedAt === 'string' ? rawState.generatedAt : null,
+        injectedPrompt: rawState.injectedPrompt,
+        error: null,
+      }
+    }
+    if (rawState?.status === 'error') {
+      return {
+        status: 'error',
+        fileCount: Number(rawState.fileCount) || 0,
+        files: Array.isArray(rawState.files) ? rawState.files.map(publicContextFile) : [],
+        generatedAt: typeof rawState.generatedAt === 'string' ? rawState.generatedAt : null,
+        injectedPrompt: typeof rawState.injectedPrompt === 'string' ? rawState.injectedPrompt : '',
+        error: typeof rawState.error === 'string' ? rawState.error : 'Context generation failed.',
+      }
+    }
+  } catch {
+    // Missing or malformed context state should not block the tutor.
+  }
+  return emptyContextState()
+}
+
+function persistContextState() {
+  fs.mkdirSync(contextDir, { recursive: true })
+  fs.writeFileSync(contextStatePath, JSON.stringify(publicContextState(), null, 2))
+}
+
+function publicContextState() {
+  return {
+    status: contextState.status,
+    fileCount: Number(contextState.fileCount) || 0,
+    files: Array.isArray(contextState.files) ? contextState.files.map(publicContextFile) : [],
+    generatedAt: contextState.generatedAt ?? null,
+    injectedPrompt: typeof contextState.injectedPrompt === 'string' ? contextState.injectedPrompt : '',
+    error: typeof contextState.error === 'string' ? contextState.error : null,
+  }
+}
+
+function publicContextFile(file) {
+  return {
+    name: typeof file?.name === 'string' ? file.name : String(file?.originalName || 'Untitled file'),
+    size: Number(file?.size) || 0,
+    extension: typeof file?.extension === 'string' ? file.extension : '',
+  }
+}
+
+async function generatePersistentContext(jobId, files) {
+  try {
+    const extractedFiles = await Promise.all(files.map(extractContextFile))
+    if (jobId !== contextJobId) return
+
+    const usableFiles = extractedFiles.filter((file) => file.text.trim())
+    const failedFiles = extractedFiles.filter((file) => file.error)
+    if (usableFiles.length === 0) {
+      throw new Error([
+        'No usable text could be extracted from the selected files.',
+        ...failedFiles.map((file) => `${file.name}: ${file.error}`),
+      ].filter(Boolean).join('\n'))
+    }
+
+    const injectedPrompt = await summarizeCourseContextWithCodex(usableFiles, failedFiles)
+    if (jobId !== contextJobId) return
+
+    contextState = {
+      status: 'ready',
+      fileCount: files.length,
+      files: files.map(({ originalName, size, extension }) => ({ name: originalName, size, extension })),
+      generatedAt: new Date().toISOString(),
+      injectedPrompt,
+      error: failedFiles.length > 0
+        ? `Skipped ${failedFiles.length} file${failedFiles.length === 1 ? '' : 's'} with extraction errors.`
+        : null,
+    }
+    persistContextState()
+    tutorThreads.clear()
+  } catch (error) {
+    if (jobId !== contextJobId) return
+    contextState = {
+      ...contextState,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    }
+    persistContextState()
+  }
+}
+
+async function extractContextFile(file) {
+  if (!acceptedContextExtensions.has(file.extension)) {
+    return {
+      name: file.originalName,
+      text: '',
+      error: `Unsupported file type "${file.extension || '(none)'}".`,
+    }
+  }
+
+  try {
+    const text = file.extension === '.pdf'
+      ? await extractPdfText(file.path)
+      : await fs.promises.readFile(file.path, 'utf8')
+    return {
+      name: file.originalName,
+      text: text.trim(),
+      error: text.trim() ? null : 'No text was extracted.',
+    }
+  } catch (error) {
+    return {
+      name: file.originalName,
+      text: '',
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function extractPdfText(filePath) {
+  return runCommand('pdftotext', ['-layout', filePath, '-'], 60_000)
+}
+
+function runCommand(command, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: appRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s.`))
+    }, timeoutMs)
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve(stdout)
+      else reject(new Error(stderr.trim() || `${command} exited with status ${code}.`))
+    })
+  })
+}
+
+async function summarizeCourseContextWithCodex(usableFiles, failedFiles) {
+  const thread = await codex.request('thread/start', {
+    cwd: appRoot,
+    approvalPolicy: 'never',
+    sandbox: 'read-only',
+    ephemeral: true,
+    developerInstructions: `
+You create compact persistent scope context for TurboLearner.
+The output is consumed by another LLM tutor, not by a human.
+The reader already knows every standard machine-learning concept; never explain standard concepts.
+Your job is only to preserve course-specific coverage, expected depth, notation, terminology, and lecture-specific nuances.
+Minimize context-window bloat.
+Do not edit files, run commands, or browse. Use only the lecture text in the prompt.
+Return only the text that should be injected into future tutor developer instructions.
+`.trim(),
+  })
+  let markdown = ''
+  await codex.startTurn({
+    threadId: thread.thread.id,
+    input: [{ type: 'text', text: buildCourseContextSummaryPrompt(usableFiles, failedFiles), text_elements: [] }],
+    cwd: appRoot,
+    approvalPolicy: 'never',
+    sandboxPolicy: { type: 'readOnly', networkAccess: false },
+    timeoutMs: contextGenerationTurnTimeoutMs,
+    onNotification: (message) => {
+      if (message.method === 'item/agentMessage/delta') {
+        markdown += message.params?.delta ?? ''
+      }
+    },
+  })
+
+  const injectedPrompt = markdown.trim()
+  if (!injectedPrompt) throw new Error('Codex generated an empty course context.')
+  return injectedPrompt
+}
+
+function buildCourseContextSummaryPrompt(usableFiles, failedFiles) {
+  const extractionNotes = failedFiles.length > 0
+    ? `
+Extraction notes for this one-time summarizer pass:
+${failedFiles.map((file) => `- ${file.name}: ${file.error}`).join('\n')}
+`.trim()
+    : 'Extraction notes for this one-time summarizer pass: none.'
+
+  return `
+Create a persistent Course Scope document from the selected lecture files.
+
+This output will be injected verbatim into future TurboLearner tutor developer instructions.
+The reader is another LLM-based tutor that already knows every standard machine-learning concept.
+No human student will read this.
+The goal is to minimize injected context-window bloat while preserving course-specific scope.
+
+Purpose:
+Tell the future tutor exactly what this course covered and at what depth.
+Do not teach the tutor machine learning.
+
+Length:
+- Prefer <= 12,000 characters.
+- You may exceed 12,000 characters only to preserve course-specific nuance, notation, unusual lecture framing, or explicit expected depth.
+- Never exceed 25,000 characters.
+
+Preserve, in priority order:
+1. Covered topic and subtopic names.
+2. Expected depth for each topic:
+   - recognition only;
+   - conceptual explanation;
+   - formula use;
+   - metric computation;
+   - algorithm tracing;
+   - derivation/proof;
+   - implementation awareness.
+3. Course-specific notation, terminology, naming, and framing.
+4. Professor-specific or slide-specific nuances.
+5. Explicit caveats stated or strongly evidenced by the lecture text.
+6. Examples only when they define exam scope or expected answer style.
+
+Drop aggressively:
+- Definitions of standard ML concepts.
+- Generic explanations.
+- Textbook descriptions.
+- Worked examples unless they define scope.
+- Step-by-step derivations unless the derivation itself is expected.
+- Objective/loss formulas unless formula recognition/use is part of expected depth.
+- Repeated formulas when a compact depth label is enough.
+- Broad enumeration of what is not covered.
+- External ML topics not evidenced by the lectures.
+- File names, extraction notes, skipped-file notes, upload details, or process metadata.
+
+Use extraction notes and file boundaries only to understand the source material.
+
+Required format:
+
+# Course Scope
+
+## Global Course Framing
+- Scope:
+- Expected level:
+- Course terminology/notation:
+- General grading/scope rules:
+
+## Covered Topics
+
+### <Topic Name>
+- Covered:
+- Expected depth:
+- Course-specific notation/terms:
+- Lecture-specific nuance/caveats:
+
+Use only bullets. Keep each bullet dense and short.
+If a field has nothing course-specific, omit that field.
+Do not include prose paragraphs.
+Do not include a "Not in scope" section.
+Return only the Course Scope document.
+
+${extractionNotes}
+
+Lecture text:
+${usableFiles.map((file) => `
+--- BEGIN FILE: ${file.name} ---
+${file.text}
+--- END FILE: ${file.name} ---
+`).join('\n')}
+`.trim()
+}
+
 class CodexAppServer {
   constructor() {
     this.proc = null
@@ -681,7 +1056,7 @@ class CodexAppServer {
     }
   }
 
-  async startTurn({ threadId, input, cwd, approvalPolicy, sandboxPolicy, onNotification }) {
+  async startTurn({ threadId, input, cwd, approvalPolicy, sandboxPolicy, timeoutMs = codexTurnTimeoutMs, onNotification }) {
     await this.ensureStarted()
     const result = await this.request('turn/start', {
       threadId,
@@ -695,9 +1070,9 @@ class CodexAppServer {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.activeTurns.delete(turnId)
-        this.restart(`Codex turn timed out after ${codexTurnTimeoutMs}ms.`)
-        reject(new CodexTimeoutError(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s.`))
-      }, codexTurnTimeoutMs)
+        this.restart(`Codex turn timed out after ${timeoutMs}ms.`)
+        reject(new CodexTimeoutError(`Codex turn timed out after ${Math.round(timeoutMs / 1000)}s.`))
+      }, timeoutMs)
 
       this.activeTurns.set(turnId, {
         threadId,
