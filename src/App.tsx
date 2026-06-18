@@ -67,6 +67,7 @@ type QuestionSet = {
   id: string
   title: string
   description: string
+  sourceType: 'static' | 'generated'
   sourcePath?: string
   questions: Question[]
 }
@@ -829,6 +830,7 @@ function App() {
             id: 'all-questions',
             title: 'All Questions',
             description: 'Practice and last year exam questions mixed together.',
+            sourceType: 'static',
             questions: allQuestions,
           }
         : null
@@ -1409,6 +1411,27 @@ function App() {
     await refreshTopics()
   }, [applyCourseContextState, refreshTopics, selectedTopicId])
 
+  const deleteGeneratedExamById = useCallback(async (setId: string) => {
+    if (!selectedTopicId) return
+    const response = await fetch(
+      `/api/topics/${encodeURIComponent(selectedTopicId)}/question-sets/${encodeURIComponent(setId)}`,
+      { method: 'DELETE' },
+    )
+    if (!response.ok) throw new Error(await response.text())
+    const payload = await response.json() as {
+      bank: QuestionBank
+      generation: ExamGenerationState
+    }
+    setBank(payload.bank)
+    applyExamGenerationState(payload.generation)
+    setExamSessions((sessions) => {
+      const remainingSessions = { ...sessions }
+      delete remainingSessions[setId]
+      return remainingSessions
+    })
+    await refreshTopics()
+  }, [applyExamGenerationState, refreshTopics, selectedTopicId])
+
   if (!selectedTopicId) {
     return (
       <main className="app-shell">
@@ -1440,6 +1463,7 @@ function App() {
           sources={topicSources}
           context={courseContext}
           onDeleteSource={deleteTopicSourceById}
+          onDeleteExam={deleteGeneratedExamById}
           onGenerateExam={startExamGeneration}
           onUploadSourceFiles={uploadTopicSourceFiles}
           onOpenContextModal={() => setIsContextModalOpen(true)}
@@ -2541,6 +2565,7 @@ function ExamMenu({
   sources,
   context,
   onDeleteSource,
+  onDeleteExam,
   onGenerateExam,
   onUploadSourceFiles,
   onOpenContextModal,
@@ -2554,6 +2579,7 @@ function ExamMenu({
   sources: TopicSource[]
   context: CourseContextState
   onDeleteSource: (sourceId: string) => void | Promise<void>
+  onDeleteExam: (setId: string) => void | Promise<void>
   onGenerateExam: () => void | Promise<void>
   onUploadSourceFiles: (files: FileList | File[]) => void | Promise<void>
   onOpenContextModal: () => void
@@ -2561,9 +2587,32 @@ function ExamMenu({
   error: string | null
 }) {
   const sourceInputRef = useRef<HTMLInputElement>(null)
+  const [examDeleteTarget, setExamDeleteTarget] = useState<QuestionSet | null>(null)
+  const [isDeletingExam, setIsDeletingExam] = useState(false)
+  const [deleteExamError, setDeleteExamError] = useState<string | null>(null)
   const isBusy = examGeneration.status === 'processing'
   const allQuestionsSet = sets.find((set) => set.id === 'all-questions') ?? null
   const examSets = sets.filter((set) => set.id !== 'all-questions')
+
+  const closeDeleteModal = useCallback(() => {
+    if (isDeletingExam) return
+    setExamDeleteTarget(null)
+    setDeleteExamError(null)
+  }, [isDeletingExam])
+
+  const confirmDeleteExam = useCallback(async () => {
+    if (!examDeleteTarget || isDeletingExam) return
+    try {
+      setIsDeletingExam(true)
+      setDeleteExamError(null)
+      await onDeleteExam(examDeleteTarget.id)
+      setExamDeleteTarget(null)
+    } catch (deleteError) {
+      setDeleteExamError(String(deleteError))
+    } finally {
+      setIsDeletingExam(false)
+    }
+  }, [examDeleteTarget, isDeletingExam, onDeleteExam])
 
   return (
     <section className="menu-screen topic-exam-screen">
@@ -2673,22 +2722,47 @@ function ExamMenu({
         <div className="menu-grid">
           {examSets.map((set, index) => {
             const summary = examMenuSummary(examSessions[set.id])
+            const isGeneratedExam = set.sourceType === 'generated'
             return (
-              <Link
-                key={set.id}
-                className="exam-tile"
-                to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(set.id)}`}
-              >
-                <span>Exam {index + 1} · {set.questions.length} questions</span>
-                <strong>{set.title}</strong>
-                {set.description && <small>{compactExamDescription(set.description)}</small>}
-                <ExamTileProgress summary={summary} />
-              </Link>
+              <div key={set.id} className="exam-tile-shell">
+                {isGeneratedExam && (
+                  <button
+                    className="exam-tile-menu-button"
+                    type="button"
+                    aria-label={`Open actions for ${set.title}`}
+                    title={`Open actions for ${set.title}`}
+                    onClick={() => {
+                      setDeleteExamError(null)
+                      setExamDeleteTarget(set)
+                    }}
+                  >
+                    <ThreeDotIcon />
+                  </button>
+                )}
+                <Link
+                  className={`exam-tile${isGeneratedExam ? ' generated-exam-tile' : ''}`}
+                  to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(set.id)}`}
+                >
+                  <span>Exam {index + 1} · {set.questions.length} questions</span>
+                  <strong>{set.title}</strong>
+                  {set.description && <small>{compactExamDescription(set.description)}</small>}
+                  <ExamTileProgress summary={summary} />
+                </Link>
+              </div>
             )
           })}
         </div>
         {error && <div className="error-box">{error}</div>}
       </div>
+      {examDeleteTarget && (
+        <DeleteExamModal
+          exam={examDeleteTarget}
+          error={deleteExamError}
+          isDeleting={isDeletingExam}
+          onConfirm={() => void confirmDeleteExam()}
+          onClose={closeDeleteModal}
+        />
+      )}
     </section>
   )
 }
@@ -2732,6 +2806,73 @@ function TrashIcon() {
     </svg>
   )
 }
+
+function ThreeDotIcon() {
+  return (
+    <svg className="three-dot-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="5" r="1.8" />
+      <circle cx="12" cy="12" r="1.8" />
+      <circle cx="12" cy="19" r="1.8" />
+    </svg>
+  )
+}
+
+const DeleteExamModal = memo(function DeleteExamModal({
+  exam,
+  error,
+  isDeleting,
+  onConfirm,
+  onClose,
+}: {
+  exam: QuestionSet
+  error: string | null
+  isDeleting: boolean
+  onConfirm: () => void
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <section
+        className="context-modal delete-exam-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-exam-modal-title"
+      >
+        <header className="context-modal-header">
+          <div>
+            <p className="eyebrow">Generated Exam</p>
+            <h2 id="delete-exam-modal-title">Delete exam?</h2>
+          </div>
+          <button className="ghost-button" type="button" disabled={isDeleting} onClick={onClose}>
+            Close
+          </button>
+        </header>
+        <div className="delete-exam-summary">
+          <strong>{exam.title}</strong>
+          <small>{exam.questions.length} questions</small>
+        </div>
+        <p className="delete-exam-copy">
+          This removes the exam from this topic and from future exam generation context.
+        </p>
+        {error && <div className="error-box">{error}</div>}
+        <div className="context-modal-actions">
+          <button className="ghost-button" type="button" disabled={isDeleting} onClick={onClose}>
+            Cancel
+          </button>
+          <button className="danger-button" type="button" disabled={isDeleting} onClick={onConfirm}>
+            {isDeleting ? 'Deleting...' : 'Delete exam'}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+})
 
 const ExamGenerationModal = memo(function ExamGenerationModal({
   generation,

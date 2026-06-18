@@ -153,6 +153,17 @@ app.get('/api/topics/:topicId/question-bank', (req, res) => {
   }
 })
 
+app.delete('/api/topics/:topicId/question-sets/:setId', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const setId = sanitizePathSegment(req.params.setId)
+    deleteGeneratedQuestionSet(topicId, setId)
+    res.json({ ok: true, bank: topicQuestionBank(topicId), generation: publicTopicExamGenerationState(topicId) })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
 app.get('/api/topics/:topicId/sources', (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
@@ -1368,6 +1379,7 @@ function topicQuestionBank(topicId) {
       id: row.id,
       title: row.title,
       description: row.description,
+      sourceType: row.source_type,
       sourcePath: row.source_path,
       questions: parseJson(row.questions_json, []),
     }))
@@ -1432,6 +1444,53 @@ function persistGeneratedExamSetForTopic(topicId, set) {
     now,
     now,
   )
+}
+
+function deleteGeneratedQuestionSet(topicId, setId) {
+  if (!setId || setId === 'all-questions') throw new Error('Generated exam not found.')
+  const row = db.prepare(`
+    SELECT id, source_type, source_path
+    FROM question_sets
+    WHERE topic_id = ? AND id = ?
+  `).get(topicId, setId)
+  if (!row) throw new Error('Generated exam not found.')
+  if (row.source_type !== 'generated') throw new Error('Only generated exams can be deleted.')
+
+  const deleteSet = db.transaction(() => {
+    db.prepare('DELETE FROM exam_sessions WHERE topic_id = ? AND set_id = ?').run(topicId, setId)
+    db.prepare('DELETE FROM question_sets WHERE topic_id = ? AND id = ?').run(topicId, setId)
+    db.prepare('UPDATE topics SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), topicId)
+    const activeJob = getActiveGenerationJob(topicId, 'exam')
+    if (activeJob?.resultId === setId) {
+      db.prepare('DELETE FROM generation_jobs WHERE id = ?').run(activeJob.id)
+    }
+  })
+  deleteSet()
+
+  if (topicId === defaultTopicId || row.source_path === '.turbolearner/generated-exams.json') {
+    deleteLegacyGeneratedExamSet(setId)
+  }
+  removeGeneratedQuestionSetAssets(topicId, setId)
+}
+
+function deleteLegacyGeneratedExamSet(setId) {
+  const bank = loadGeneratedExamBank()
+  const nextSets = bank.sets.filter((candidate) => candidate?.id !== setId)
+  if (nextSets.length === bank.sets.length) return
+  fs.mkdirSync(contextDir, { recursive: true })
+  fs.writeFileSync(generatedExamsPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    sets: nextSets,
+  }, null, 2))
+}
+
+function removeGeneratedQuestionSetAssets(topicId, setId) {
+  for (const assetDir of [
+    path.join(topicPath(topicId), 'generated-assets', setId),
+    path.join(generatedAssetsDir, setId),
+  ]) {
+    fs.rmSync(assetDir, { recursive: true, force: true })
+  }
 }
 
 function listTopicSources(topicId) {

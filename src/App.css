@@ -391,6 +391,56 @@
   text-decoration: none;
 }
 
+.exam-tile-shell {
+  position: relative;
+  min-width: 0;
+}
+
+.exam-tile-shell .exam-tile {
+  height: 100%;
+}
+
+.generated-exam-tile {
+  padding-top: 52px;
+}
+
+.exam-tile-menu-button {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  cursor: pointer;
+}
+
+.exam-tile-menu-button:hover {
+  color: var(--text-h);
+  background: var(--surface-strong);
+}
+
+.exam-tile-menu-button:focus {
+  outline: none;
+}
+
+.exam-tile-menu-button:focus-visible {
+  border-color: var(--border);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-h) 18%, transparent);
+}
+
+.three-dot-icon {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
 .exam-tile:hover {
   border-color: var(--accent);
 }
@@ -1072,6 +1122,7 @@
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .ghost-button,
 .chat-row button {
   border: 1px solid var(--border);
@@ -1094,8 +1145,19 @@
   text-decoration: none;
 }
 
+.danger-button {
+  border-color: rgba(185, 28, 28, 0.5);
+  background: rgba(185, 28, 28, 0.18);
+  color: #fecaca;
+}
+
+.danger-button:hover {
+  background: rgba(185, 28, 28, 0.28);
+}
+
 .primary-button:disabled,
 .secondary-button:disabled,
+.danger-button:disabled,
 .ghost-button:disabled,
 .chat-row button:disabled {
   opacity: 0.65;
@@ -1552,6 +1614,34 @@ body.resizing-codex-sidebar {
 
 .exam-generation-modal {
   width: min(900px, calc(100vw - 48px));
+}
+
+.delete-exam-modal {
+  width: min(520px, calc(100vw - 48px));
+}
+
+.delete-exam-summary {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.delete-exam-summary strong {
+  color: var(--text-h);
+}
+
+.delete-exam-summary small,
+.delete-exam-copy {
+  color: var(--muted);
+}
+
+.delete-exam-copy {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .context-modal-actions {
