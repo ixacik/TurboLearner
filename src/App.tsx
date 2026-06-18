@@ -15,6 +15,7 @@ import type {
   CSSProperties,
   PointerEvent as ReactPointerEvent,
   RefObject,
+  SetStateAction,
 } from 'react'
 import Markdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -133,6 +134,31 @@ type CourseContextState = {
   error: string | null
 }
 
+type ExamGenerationStatus = 'idle' | 'processing' | 'ready' | 'error'
+
+type ExamGenerationLogEntry = {
+  id: string
+  at: string
+  kind: 'assistant' | 'tool' | 'status' | 'error'
+  message: string
+  detail?: string
+}
+
+type ExamGenerationState = {
+  status: ExamGenerationStatus
+  phase: string
+  fileCount: number
+  files: ContextFile[]
+  startedAt: string | null
+  completedAt: string | null
+  threadId: string | null
+  generatedExamId: string | null
+  generatedExamTitle: string | null
+  questionCount: number
+  log: ExamGenerationLogEntry[]
+  error: string | null
+}
+
 type ProgressRecord = {
   attempts: number
   correct: number
@@ -154,6 +180,21 @@ type TutorMessage = {
   role: 'learner' | 'tutor'
   content: string
   kind?: 'chat' | 'grading' | 'learning' | 'pending' | 'grading-pending' | 'learning-pending'
+}
+
+type ExamSession = {
+  currentId: string | null
+  questionQueue: string[]
+  answersByQuestion: Record<string, AnswerPayload>
+  result: TutorResponse | null
+  isAnswerKeyRevealed: boolean
+  revealedCorrectOptionIdsByQuestion: Record<string, string[]>
+  messages: TutorMessage[]
+  tutorSessionId: string
+  optionOrderSeed: string
+  usedLearningBeforeAnswer: boolean
+  progress: Record<string, ProgressRecord>
+  history: HistoryItem[]
 }
 
 type MarkdownCopyPopup = {
@@ -182,19 +223,8 @@ function identity<T>(value: T) {
   return value
 }
 
-const progressKey = 'turbolearner.progress.v1'
 const activeSetKey = 'turbolearner.activeSet.v1'
-const activeQuestionKey = 'turbolearner.activeQuestion.v1'
-const activeQuestionQueueKey = 'turbolearner.activeQuestionQueue.v1'
-const activeAnswersKey = 'turbolearner.activeAnswers.v1'
-const activeResultKey = 'turbolearner.activeResult.v1'
-const activeAnswerKeyRevealedKey = 'turbolearner.activeAnswerKeyRevealed.v1'
-const activeRevealedCorrectOptionIdsKey = 'turbolearner.revealedCorrectOptionIds.v1'
-const activeHistoryKey = 'turbolearner.activeHistory.v1'
-const activeMessagesKey = 'turbolearner.activeMessages.v1'
-const activeTutorSessionKey = 'turbolearner.activeTutorSession.v1'
-const activeOptionOrderSeedKey = 'turbolearner.activeOptionOrderSeed.v1'
-const activeUsedLearningBeforeAnswerKey = 'turbolearner.usedLearningBeforeAnswer.v1'
+const examSessionsKey = 'turbolearner.examSessions.v1'
 const codexSidebarWidthKey = 'turbolearner.codexSidebarWidth.v1'
 const defaultCodexSidebarWidth = 480
 const minCodexSidebarWidth = 360
@@ -207,6 +237,26 @@ const emptyCourseContextState: CourseContextState = {
   files: [],
   generatedAt: null,
   injectedPrompt: '',
+  error: null,
+}
+const emptyProgressRecords: Record<string, ProgressRecord> = {}
+const emptyHistoryItems: HistoryItem[] = []
+const emptyQuestionQueue: string[] = []
+const emptyAnswersByQuestion: Record<string, AnswerPayload> = {}
+const emptyRevealedCorrectOptionIdsByQuestion: Record<string, string[]> = {}
+const emptyTutorMessages: TutorMessage[] = []
+const emptyExamGenerationState: ExamGenerationState = {
+  status: 'idle',
+  phase: '',
+  fileCount: 0,
+  files: [],
+  startedAt: null,
+  completedAt: null,
+  threadId: null,
+  generatedExamId: null,
+  generatedExamTitle: null,
+  questionCount: 0,
+  log: [],
   error: null,
 }
 const codeLanguageAliases: Record<string, string> = {
@@ -364,28 +414,10 @@ mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' 
 function App() {
   const [bank, setBank] = useState<QuestionBank | null>(null)
   const [selectedSetId, setSelectedSetId] = useLocalState<string | null>(activeSetKey, null)
-  const [progress, setProgress] = useLocalState<Record<string, ProgressRecord>>(progressKey, {})
-  const [history, setHistory] = useLocalState<HistoryItem[]>(activeHistoryKey, [])
-  const [currentId, setCurrentId] = useLocalState<string | null>(activeQuestionKey, null)
-  const [questionQueue, setQuestionQueue] = useLocalState<string[]>(
-    activeQuestionQueueKey,
-    [],
-  )
-  const [answersByQuestion, setAnswersByQuestion] = useLocalState<Record<string, AnswerPayload>>(
-    activeAnswersKey,
+  const [examSessions, setExamSessions] = useLocalState<Record<string, ExamSession>>(
+    examSessionsKey,
     {},
-  )
-  const [result, setResult] = useLocalState<TutorResponse | null>(activeResultKey, null)
-  const [isAnswerKeyRevealed, setIsAnswerKeyRevealed] = useLocalState(
-    activeAnswerKeyRevealedKey,
-    false,
-  )
-  const [revealedCorrectOptionIdsByQuestion, setRevealedCorrectOptionIdsByQuestion] =
-    useLocalState<Record<string, string[]>>(activeRevealedCorrectOptionIdsKey, {})
-  const [messages, setMessages] = useLocalState<TutorMessage[]>(
-    activeMessagesKey,
-    [],
-    persistedTutorMessages,
+    prepareExamSessionsForStorage,
     { persistenceDelayMs: localStatePersistenceDelayMs },
   )
   const [isGrading, setIsGrading] = useState(false)
@@ -402,27 +434,96 @@ function App() {
     clear: clearStreamingTutorMessage,
   } = useBatchedStreamingText()
   const [streamingMessageKind, setStreamingMessageKind] = useState<TutorMessage['kind'] | null>(null)
-  const [tutorSessionId, setTutorSessionId] = useLocalState(
-    activeTutorSessionKey,
-    crypto.randomUUID(),
-  )
-  const [optionOrderSeed, setOptionOrderSeed] = useLocalState(
-    activeOptionOrderSeedKey,
-    crypto.randomUUID(),
-  )
-  const [usedLearningBeforeAnswer, setUsedLearningBeforeAnswer] = useLocalState(
-    activeUsedLearningBeforeAnswerKey,
-    false,
-  )
   const [error, setError] = useState<string | null>(null)
   const [courseContext, setCourseContext] = useState<CourseContextState>(emptyCourseContextState)
   const [isContextModalOpen, setIsContextModalOpen] = useState(false)
+  const [examGeneration, setExamGeneration] = useState<ExamGenerationState>(emptyExamGenerationState)
+  const [isExamGenerationModalOpen, setIsExamGenerationModalOpen] = useState(false)
+  const [examGenerationToast, setExamGenerationToast] = useState<string | null>(null)
   const chatComposerRef = useRef<ChatComposerHandle>(null)
   const codexLogRef = useRef<HTMLDivElement>(null)
   const shouldFollowCodexStreamRef = useRef(true)
   const isUserScrollingCodexRef = useRef(false)
   const codexScrollIntentResetRef = useRef<number | null>(null)
   const courseContextSignatureRef = useRef<string | null>(null)
+  const examGenerationStatusRef = useRef<ExamGenerationStatus>('idle')
+  const activeSession = selectedSetId ? examSessions[selectedSetId] ?? null : null
+  const progress = activeSession?.progress ?? emptyProgressRecords
+  const history = activeSession?.history ?? emptyHistoryItems
+  const currentId = activeSession?.currentId ?? null
+  const questionQueue = activeSession?.questionQueue ?? emptyQuestionQueue
+  const answersByQuestion = activeSession?.answersByQuestion ?? emptyAnswersByQuestion
+  const result = activeSession?.result ?? null
+  const isAnswerKeyRevealed = activeSession?.isAnswerKeyRevealed ?? false
+  const revealedCorrectOptionIdsByQuestion =
+    activeSession?.revealedCorrectOptionIdsByQuestion ?? emptyRevealedCorrectOptionIdsByQuestion
+  const messages = activeSession?.messages ?? emptyTutorMessages
+  const tutorSessionId = activeSession?.tutorSessionId ?? ''
+  const optionOrderSeed = activeSession?.optionOrderSeed ?? ''
+  const usedLearningBeforeAnswer = activeSession?.usedLearningBeforeAnswer ?? false
+
+  const updateActiveSession = useCallback((updater: (session: ExamSession) => ExamSession) => {
+    if (!selectedSetId) return
+
+    setExamSessions((sessions) => {
+      const session = sessions[selectedSetId]
+      if (!session) return sessions
+      const nextSession = updater(session)
+      if (nextSession === session) return sessions
+      return { ...sessions, [selectedSetId]: nextSession }
+    })
+  }, [selectedSetId, setExamSessions])
+
+  const updateActiveSessionField = useCallback(<K extends keyof ExamSession>(
+    key: K,
+    value: SetStateAction<ExamSession[K]>,
+  ) => {
+    updateActiveSession((session) => ({
+      ...session,
+      [key]: typeof value === 'function'
+        ? (value as (current: ExamSession[K]) => ExamSession[K])(session[key])
+        : value,
+    }))
+  }, [updateActiveSession])
+
+  const setProgress = useCallback((value: SetStateAction<Record<string, ProgressRecord>>) => {
+    updateActiveSessionField('progress', value)
+  }, [updateActiveSessionField])
+  const setHistory = useCallback((value: SetStateAction<HistoryItem[]>) => {
+    updateActiveSessionField('history', value)
+  }, [updateActiveSessionField])
+  const setCurrentId = useCallback((value: SetStateAction<string | null>) => {
+    updateActiveSessionField('currentId', value)
+  }, [updateActiveSessionField])
+  const setQuestionQueue = useCallback((value: SetStateAction<string[]>) => {
+    updateActiveSessionField('questionQueue', value)
+  }, [updateActiveSessionField])
+  const setAnswersByQuestion = useCallback((value: SetStateAction<Record<string, AnswerPayload>>) => {
+    updateActiveSessionField('answersByQuestion', value)
+  }, [updateActiveSessionField])
+  const setResult = useCallback((value: SetStateAction<TutorResponse | null>) => {
+    updateActiveSessionField('result', value)
+  }, [updateActiveSessionField])
+  const setIsAnswerKeyRevealed = useCallback((value: SetStateAction<boolean>) => {
+    updateActiveSessionField('isAnswerKeyRevealed', value)
+  }, [updateActiveSessionField])
+  const setRevealedCorrectOptionIdsByQuestion = useCallback((
+    value: SetStateAction<Record<string, string[]>>,
+  ) => {
+    updateActiveSessionField('revealedCorrectOptionIdsByQuestion', value)
+  }, [updateActiveSessionField])
+  const setMessages = useCallback((value: SetStateAction<TutorMessage[]>) => {
+    updateActiveSessionField('messages', value)
+  }, [updateActiveSessionField])
+  const setTutorSessionId = useCallback((value: SetStateAction<string>) => {
+    updateActiveSessionField('tutorSessionId', value)
+  }, [updateActiveSessionField])
+  const setOptionOrderSeed = useCallback((value: SetStateAction<string>) => {
+    updateActiveSessionField('optionOrderSeed', value)
+  }, [updateActiveSessionField])
+  const setUsedLearningBeforeAnswer = useCallback((value: SetStateAction<boolean>) => {
+    updateActiveSessionField('usedLearningBeforeAnswer', value)
+  }, [updateActiveSessionField])
 
   const applyCourseContextState = useCallback((nextContext: CourseContextState) => {
     setCourseContext(nextContext)
@@ -444,12 +545,42 @@ function App() {
     applyCourseContextState(await response.json() as CourseContextState)
   }, [applyCourseContextState])
 
+  const refreshQuestionBank = useCallback(async () => {
+    const response = await fetch('/api/question-bank')
+    if (!response.ok) throw new Error(await response.text())
+    const loadedBank = await response.json() as QuestionBank
+    setBank(loadedBank)
+    return loadedBank
+  }, [])
+
+  const applyExamGenerationState = useCallback((nextGeneration: ExamGenerationState) => {
+    const previousStatus = examGenerationStatusRef.current
+    examGenerationStatusRef.current = nextGeneration.status
+    setExamGeneration(nextGeneration)
+
+    if (previousStatus === 'processing' && nextGeneration.status === 'ready') {
+      setExamGenerationToast(`Generated ${nextGeneration.generatedExamTitle || 'exam'}.`)
+      void refreshQuestionBank()
+    }
+    if (previousStatus === 'processing' && nextGeneration.status === 'error') {
+      setExamGenerationToast(nextGeneration.error || 'Exam generation failed.')
+    }
+  }, [refreshQuestionBank])
+
+  const refreshExamGeneration = useCallback(async () => {
+    const response = await fetch('/api/exam-generation')
+    if (!response.ok) throw new Error(await response.text())
+    applyExamGenerationState(await response.json() as ExamGenerationState)
+  }, [applyExamGenerationState])
+
   useEffect(() => {
-    fetch('/questions.json')
-      .then((response) => response.json())
+    fetch('/api/question-bank')
+      .then((response) => {
+        if (!response.ok) return response.text().then((message) => Promise.reject(new Error(message)))
+        return response.json()
+      })
       .then((loadedBank: QuestionBank) => {
         setBank(loadedBank)
-
         const questionOverrideId = new URLSearchParams(window.location.search).get('question')
         if (!questionOverrideId) return
 
@@ -459,29 +590,31 @@ function App() {
           return
         }
 
+        setExamSessions((sessions) => {
+          const existingSession = sessions[override.setId] ?? createExamSession({
+            currentId: override.unitId,
+            queue: [],
+          })
+          return {
+            ...sessions,
+            [override.setId]: resetExamSessionQuestionState(existingSession, {
+              currentId: override.unitId,
+              questionQueue: [],
+            }),
+          }
+        })
         setSelectedSetId(override.setId)
-        setCurrentId(override.unitId)
-        setQuestionQueue([])
-        setAnswersByQuestion({})
-        setResult(null)
-        setMessages([])
         setIsSubmittingAnswer(false)
         setCodexStatus('')
         clearStreamingTutorMessage()
         setStreamingMessageKind(null)
-        setTutorSessionId(crypto.randomUUID())
         setError(null)
       })
       .catch((loadError) => setError(String(loadError)))
   }, [
-    setAnswersByQuestion,
-    setCurrentId,
     clearStreamingTutorMessage,
-    setMessages,
-    setQuestionQueue,
-    setResult,
+    setExamSessions,
     setSelectedSetId,
-    setTutorSessionId,
   ])
 
   useEffect(() => {
@@ -503,6 +636,27 @@ function App() {
   }, [applyCourseContextState])
 
   useEffect(() => {
+    let isCancelled = false
+    fetch('/api/exam-generation')
+      .then((response) => {
+        if (!response.ok) return response.text().then((message) => Promise.reject(new Error(message)))
+        return response.json()
+      })
+      .then((nextGeneration: ExamGenerationState) => {
+        if (!isCancelled) {
+          examGenerationStatusRef.current = nextGeneration.status
+          setExamGeneration(nextGeneration)
+        }
+      })
+      .catch((generationError) => {
+        if (!isCancelled) setError(String(generationError))
+      })
+    return () => {
+      isCancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     if (courseContext.status !== 'processing') return
     const interval = window.setInterval(() => {
       refreshCourseContext().catch((contextError) => {
@@ -515,6 +669,27 @@ function App() {
     }, 1500)
     return () => window.clearInterval(interval)
   }, [courseContext.status, refreshCourseContext])
+
+  useEffect(() => {
+    if (examGeneration.status !== 'processing') return
+    const interval = window.setInterval(() => {
+      refreshExamGeneration().catch((generationError) => {
+        setExamGeneration((currentGeneration) => ({
+          ...currentGeneration,
+          status: 'error',
+          phase: 'Status refresh failed',
+          error: String(generationError),
+        }))
+      })
+    }, 1500)
+    return () => window.clearInterval(interval)
+  }, [examGeneration.status, refreshExamGeneration])
+
+  useEffect(() => {
+    if (!examGenerationToast) return
+    const timeout = window.setTimeout(() => setExamGenerationToast(null), 5200)
+    return () => window.clearTimeout(timeout)
+  }, [examGenerationToast])
 
   const allSets = useMemo(() => {
     const baseSets = bank?.sets ?? []
@@ -687,28 +862,38 @@ function App() {
   }, [showNextQuestion])
 
   const startSet = useCallback((setId: string) => {
-    setSelectedSetId(setId)
     const nextSet = allSets.find((set) => set.id === setId)
-    resetQuestionState()
     if (!nextSet) return
 
-    const initialDeck = buildInitialQuestionDeck(buildQuestionUnits(nextSet.questions))
-    setCurrentId(initialDeck.currentId)
-    setQuestionQueue(initialDeck.queue)
+    const nextUnits = buildQuestionUnits(nextSet.questions)
+    setExamSessions((sessions) => {
+      const existingSession = sessions[setId]
+      if (isExamSessionValid(existingSession, nextUnits)) return sessions
+      return {
+        ...sessions,
+        [setId]: createExamSession(buildInitialQuestionDeck(nextUnits)),
+      }
+    })
+    setSelectedSetId(setId)
+    setIsSubmittingAnswer(false)
+    setCodexStatus('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind(null)
+    setError(null)
   }, [
     allSets,
-    resetQuestionState,
-    setCurrentId,
-    setQuestionQueue,
+    clearStreamingTutorMessage,
+    setExamSessions,
     setSelectedSetId,
   ])
 
   const returnToMenu = useCallback(() => {
     setSelectedSetId(null)
-    setCurrentId(null)
-    setQuestionQueue([])
-    resetQuestionState()
-  }, [resetQuestionState, setCurrentId, setQuestionQueue, setSelectedSetId])
+    setIsSubmittingAnswer(false)
+    setCodexStatus('')
+    clearStreamingTutorMessage()
+    setStreamingMessageKind(null)
+  }, [clearStreamingTutorMessage, setSelectedSetId])
 
   const toggleOption = useCallback((question: Question, optionId: string) => {
     if (result) return
@@ -1009,12 +1194,50 @@ function App() {
     }
   }, [applyCourseContextState])
 
+  const uploadExamGenerationFiles = useCallback(async (files: FileList | File[]) => {
+    const selectedFiles = Array.from(files)
+    if (selectedFiles.length === 0) return
+    const formData = new FormData()
+    for (const file of selectedFiles) formData.append('files', file)
+
+    try {
+      setIsExamGenerationModalOpen(true)
+      const response = await fetch('/api/exam-generation/files', {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) throw new Error(await response.text())
+      applyExamGenerationState(await response.json() as ExamGenerationState)
+    } catch (uploadError) {
+      applyExamGenerationState({
+        ...emptyExamGenerationState,
+        status: 'error',
+        phase: 'Upload failed',
+        error: String(uploadError),
+        log: [{
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          kind: 'error',
+          message: String(uploadError),
+        }],
+      })
+      setIsExamGenerationModalOpen(true)
+    }
+  }, [applyExamGenerationState])
+
   const clearCourseContext = useCallback(async () => {
     const response = await fetch('/api/context', { method: 'DELETE' })
     if (!response.ok) throw new Error(await response.text())
     applyCourseContextState(await response.json() as CourseContextState)
     setIsContextModalOpen(false)
   }, [applyCourseContextState])
+
+  const clearExamGeneration = useCallback(async () => {
+    const response = await fetch('/api/exam-generation', { method: 'DELETE' })
+    if (!response.ok) throw new Error(await response.text())
+    applyExamGenerationState(await response.json() as ExamGenerationState)
+    setIsExamGenerationModalOpen(false)
+  }, [applyExamGenerationState])
 
   if (!bank) {
     return (
@@ -1029,9 +1252,23 @@ function App() {
       <main className="app-shell">
         <ExamMenu
           sets={allSets}
+          examSessions={examSessions}
+          examGeneration={examGeneration}
           onStart={startSet}
+          onUploadExamFiles={uploadExamGenerationFiles}
+          onOpenExamGenerationModal={() => setIsExamGenerationModalOpen(true)}
           error={error}
         />
+        {isExamGenerationModalOpen && (
+          <ExamGenerationModal
+            generation={examGeneration}
+            onClear={() => void clearExamGeneration()}
+            onClose={() => setIsExamGenerationModalOpen(false)}
+          />
+        )}
+        {examGenerationToast && (
+          <Toast message={examGenerationToast} onClose={() => setExamGenerationToast(null)} />
+        )}
       </main>
     )
   }
@@ -1121,6 +1358,16 @@ function App() {
         streamingMessageKind={streamingMessageKind}
         streamingTutorMessage={streamingTutorMessage}
       />
+      {isExamGenerationModalOpen && (
+        <ExamGenerationModal
+          generation={examGeneration}
+          onClear={() => void clearExamGeneration()}
+          onClose={() => setIsExamGenerationModalOpen(false)}
+        />
+      )}
+      {examGenerationToast && (
+        <Toast message={examGenerationToast} onClose={() => setExamGenerationToast(null)} />
+      )}
     </main>
   )
 }
@@ -1987,29 +2234,264 @@ function getOpenAnswerState(
 
 function ExamMenu({
   sets,
+  examSessions,
+  examGeneration,
   onStart,
+  onUploadExamFiles,
+  onOpenExamGenerationModal,
   error,
 }: {
   sets: QuestionSet[]
+  examSessions: Record<string, ExamSession>
+  examGeneration: ExamGenerationState
   onStart: (id: string) => void
+  onUploadExamFiles: (files: FileList | File[]) => void | Promise<void>
+  onOpenExamGenerationModal: () => void
   error: string | null
 }) {
+  const examInputRef = useRef<HTMLInputElement>(null)
+  const isBusy = examGeneration.status === 'processing'
+
   return (
     <section className="menu-screen">
       <div className="menu-heading">
         <h1>Exams</h1>
+        <div className="menu-actions">
+          <input
+            ref={examInputRef}
+            className="context-file-input"
+            type="file"
+            accept=".pdf,.txt,.md,.csv,.json,.log,application/pdf,text/*"
+            multiple
+            onChange={(event) => {
+              const { files } = event.currentTarget
+              if (files?.length) void onUploadExamFiles(files)
+              event.currentTarget.value = ''
+            }}
+          />
+          <button
+            className={`generate-exam-button generation-${examGeneration.status}`}
+            type="button"
+            onClick={() => {
+              if (examGeneration.status === 'processing' || examGeneration.status === 'ready' || examGeneration.status === 'error') {
+                onOpenExamGenerationModal()
+                return
+              }
+              examInputRef.current?.click()
+            }}
+          >
+            {isBusy && <span className="context-spinner" aria-hidden="true" />}
+            {examGeneration.status === 'idle' ? 'Generate exam' : examGenerationTileTitle(examGeneration)}
+          </button>
+        </div>
       </div>
       <div className="menu-grid">
-        {sets.map((set) => (
-          <button key={set.id} className="exam-tile" type="button" onClick={() => onStart(set.id)}>
-            <span>{set.questions.length} questions</span>
-            <strong>{set.title}</strong>
-          </button>
-        ))}
+        {sets.map((set, index) => {
+          const summary = examMenuSummary(examSessions[set.id])
+          return (
+            <button key={set.id} className="exam-tile" type="button" onClick={() => onStart(set.id)}>
+              <span>Exam {index + 1} · {set.questions.length} questions</span>
+              <strong>{set.title}</strong>
+              {set.description && <small>{compactExamDescription(set.description)}</small>}
+              <ExamTileProgress summary={summary} />
+            </button>
+          )
+        })}
       </div>
       {error && <div className="error-box">{error}</div>}
     </section>
   )
+}
+
+const ExamGenerationModal = memo(function ExamGenerationModal({
+  generation,
+  onClear,
+  onClose,
+}: {
+  generation: ExamGenerationState
+  onClear: () => void
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <section
+        className="context-modal exam-generation-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="exam-generation-modal-title"
+      >
+        <header className="context-modal-header">
+          <div>
+            <p className="eyebrow">Exam Generation</p>
+            <h2 id="exam-generation-modal-title">{examGenerationTileTitle(generation)}</h2>
+          </div>
+          <button className="ghost-button" type="button" onClick={onClose}>
+            Close
+          </button>
+        </header>
+
+        <div className="context-modal-meta">
+          <span>Status: {generation.status}</span>
+          {generation.phase && <span>{generation.phase}</span>}
+          {generation.startedAt && <span>Started {formatDateTime(generation.startedAt)}</span>}
+          {generation.completedAt && <span>Finished {formatDateTime(generation.completedAt)}</span>}
+          {generation.threadId && <span>Thread {generation.threadId}</span>}
+        </div>
+
+        <ul className="context-file-list">
+          {generation.files.map((file, index) => (
+            <li key={`${file.name}:${index}`}>
+              <span>{file.name}</span>
+              <small>{formatBytes(file.size)}</small>
+            </li>
+          ))}
+        </ul>
+
+        {generation.error && <div className="error-box">{generation.error}</div>}
+
+        <div className="exam-generation-feed">
+          {generation.log.length > 0 ? (
+            compactExamGenerationLog(generation.log).map((entry) => (
+              <div key={entry.id} className={`exam-generation-event event-${entry.kind}`}>
+                <div className="exam-generation-event-label">
+                  {examGenerationEventLabel(entry)}
+                  <span>{formatEventTime(entry.at)}</span>
+                </div>
+                <div className="exam-generation-event-body">
+                  {entry.kind === 'assistant' ? (
+                    <MarkdownBlock mode="chat">{entry.message}</MarkdownBlock>
+                  ) : (
+                    <>
+                      <strong>{entry.message}</strong>
+                      {entry.detail && <small>{entry.detail}</small>}
+                    </>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="empty-chat">No generation activity yet.</div>
+          )}
+        </div>
+
+        <footer className="context-modal-actions">
+          <button className="secondary-button" type="button" onClick={onClear}>
+            Clear generation status
+          </button>
+        </footer>
+      </section>
+    </div>
+  )
+})
+
+const Toast = memo(function Toast({
+  message,
+  onClose,
+}: {
+  message: string
+  onClose: () => void
+}) {
+  return (
+    <button className="app-toast" type="button" onClick={onClose}>
+      {message}
+    </button>
+  )
+})
+
+const ExamTileProgress = memo(function ExamTileProgress({
+  summary,
+}: {
+  summary: {
+    last25: HistoryItem[]
+    correctLast25: number
+    seen: number
+  }
+}) {
+  return (
+    <div className="exam-tile-progress">
+      <div className="exam-tile-stats">
+        <span>Last 25 <strong>{summary.correctLast25}/{summary.last25.length || 25}</strong></span>
+        <span>Seen <strong>{summary.seen}</strong></span>
+      </div>
+      <div className="exam-tile-history" aria-label={`Last 25: ${summary.correctLast25} correct`}>
+        {Array.from({ length: 25 }, (_, index) => {
+          const item = summary.last25[index]
+          return (
+            <span
+              key={index}
+              className={`exam-tile-dot ${item ? item.isCorrect ? 'correct' : 'wrong' : ''}`}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+})
+
+function examMenuSummary(session: ExamSession | undefined) {
+  const last25 = session?.history.slice(0, 25) ?? []
+  return {
+    last25,
+    correctLast25: last25.filter((item) => item.isCorrect).length,
+    seen: Object.keys(session?.progress ?? {}).length,
+  }
+}
+
+function examGenerationTileTitle(generation: ExamGenerationState) {
+  if (generation.status === 'processing') return 'Generating exam'
+  if (generation.status === 'ready') return generation.generatedExamTitle || 'Generated exam ready'
+  if (generation.status === 'error') return 'Exam generation failed'
+  return 'Generate exam'
+}
+
+function compactExamGenerationLog(log: ExamGenerationLogEntry[]) {
+  const compacted: ExamGenerationLogEntry[] = []
+  for (const entry of log) {
+    if (!entry.message.trim()) continue
+    const previous = compacted.at(-1)
+    if (entry.kind === 'assistant' && previous?.kind === 'assistant') {
+      compacted[compacted.length - 1] = {
+        ...previous,
+        at: entry.at,
+        message: `${previous.message}${entry.message}`,
+      }
+      continue
+    }
+    compacted.push(entry)
+  }
+  return compacted
+}
+
+function examGenerationEventLabel(entry: ExamGenerationLogEntry) {
+  if (entry.kind === 'assistant') return 'Codex'
+  if (entry.kind === 'tool') return 'Tool'
+  if (entry.kind === 'error') return 'Error'
+  return 'Status'
+}
+
+function formatEventTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function compactExamDescription(description: string) {
+  return description
+    .replace(/^Generated exam question set covering\s+/i, 'Covers ')
+    .replace(/^Machine Learning BSc practice exam,\s*/i, '')
+    .replace(/^Previous Machine Learning exam questions\.?$/i, 'Previous exam.')
+    .replace(/\.$/, '')
+    .split(/[,;]/)
+    .slice(0, 3)
+    .join(', ')
+    .trim()
+    .replace(/\.$/, '') + '.'
 }
 
 const MarkdownBlock = memo(function MarkdownBlock({
@@ -2099,7 +2581,7 @@ function encodeMarkdownUrl(url: string) {
 
 function resolveImageSource(src?: string) {
   if (!src) return ''
-  if (/^(https?:|data:|blob:|\/api\/file)/i.test(src)) return src
+  if (/^(https?:|data:|blob:|\/api\/file|\/api\/generated-assets\/)/i.test(src)) return src
   if (/^\/(generated-assets|favicon\.svg|icons\.svg)\b/i.test(src)) return src
   return `/api/file?path=${encodeURIComponent(decodeUrl(src))}`
 }
@@ -2399,6 +2881,59 @@ function isUnitAnswered(unit: QuestionUnit, answersByQuestion: Record<string, An
     if (question.type === 'open') return Boolean(answer.text)
     return (answer.selectedOptionIds ?? []).length > 0
   })
+}
+
+function createExamSession(deck: { currentId: string | null; queue: string[] }): ExamSession {
+  return {
+    currentId: deck.currentId,
+    questionQueue: deck.queue,
+    answersByQuestion: {},
+    result: null,
+    isAnswerKeyRevealed: false,
+    revealedCorrectOptionIdsByQuestion: {},
+    messages: [],
+    tutorSessionId: crypto.randomUUID(),
+    optionOrderSeed: crypto.randomUUID(),
+    usedLearningBeforeAnswer: false,
+    progress: {},
+    history: [],
+  }
+}
+
+function resetExamSessionQuestionState(
+  session: ExamSession,
+  nextQuestionState: Pick<ExamSession, 'currentId' | 'questionQueue'>,
+): ExamSession {
+  return {
+    ...session,
+    ...nextQuestionState,
+    answersByQuestion: {},
+    result: null,
+    isAnswerKeyRevealed: false,
+    revealedCorrectOptionIdsByQuestion: {},
+    messages: [],
+    tutorSessionId: crypto.randomUUID(),
+    optionOrderSeed: crypto.randomUUID(),
+    usedLearningBeforeAnswer: false,
+  }
+}
+
+function prepareExamSessionsForStorage(sessions: Record<string, ExamSession>): Record<string, ExamSession> {
+  return Object.fromEntries(
+    Object.entries(sessions).map(([setId, session]) => [
+      setId,
+      {
+        ...session,
+        messages: persistedTutorMessages(session.messages),
+      },
+    ]),
+  )
+}
+
+function isExamSessionValid(session: ExamSession | undefined, units: QuestionUnit[]) {
+  if (!session?.currentId) return false
+  const unitIds = new Set(units.map((unit) => unit.id))
+  return unitIds.has(session.currentId) && session.questionQueue.every((id) => unitIds.has(id))
 }
 
 function buildInitialQuestionDeck(units: QuestionUnit[]) {

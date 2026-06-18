@@ -3,6 +3,7 @@ import express from 'express'
 import fs from 'node:fs'
 import multer from 'multer'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -19,15 +20,25 @@ const tutorThreadCleanupIntervalMs = Math.min(tutorThreadTtlMs, 5 * 60 * 1000)
 const contextDir = path.join(appRoot, '.turbolearner')
 const contextUploadsDir = path.join(contextDir, 'uploads')
 const contextStatePath = path.join(contextDir, 'context.json')
+const examUploadsDir = path.join(contextDir, 'exam-uploads')
+const generatedAssetsDir = path.join(contextDir, 'generated-assets')
+const examGenerationStatePath = path.join(contextDir, 'exam-generation.json')
+const generatedExamsPath = path.join(contextDir, 'generated-exams.json')
+const questionBankPath = path.join(appRoot, 'public', 'questions.json')
 const textFileExtensions = new Set(['.txt', '.md', '.csv', '.json', '.log'])
 const acceptedContextExtensions = new Set(['.pdf', ...textFileExtensions])
+const examGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_EXAM_GENERATION_TURN_TIMEOUT_MS || 20 * 60 * 1000)
 
 const tutorThreads = new Map()
 let contextState = loadContextState()
 let contextJobId = 0
+let examGenerationState = loadExamGenerationState()
+let examGenerationJobId = 0
 let codex
 
 fs.mkdirSync(contextUploadsDir, { recursive: true })
+fs.mkdirSync(examUploadsDir, { recursive: true })
+fs.mkdirSync(generatedAssetsDir, { recursive: true })
 
 app.use(cors())
 app.use(express.json({ limit: '1mb' }))
@@ -47,8 +58,31 @@ const uploadContextFiles = multer({
   },
 })
 
+const uploadExamFiles = multer({
+  storage: multer.diskStorage({
+    destination: examUploadsDir,
+    filename: (_req, file, cb) => {
+      const extension = path.extname(file.originalname).toLowerCase()
+      const base = path.basename(file.originalname, extension).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'file'
+      cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}-${base}${extension}`)
+    },
+  }),
+  limits: {
+    files: 24,
+    fileSize: 100 * 1024 * 1024,
+  },
+})
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, codex: 'app-server', port })
+})
+
+app.get('/api/question-bank', (_req, res) => {
+  try {
+    res.json(mergedQuestionBank())
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
 })
 
 app.get('/api/context', (_req, res) => {
@@ -89,6 +123,69 @@ app.delete('/api/context', (_req, res) => {
   persistContextState()
   tutorThreads.clear()
   res.json(publicContextState())
+})
+
+app.get('/api/exam-generation', (_req, res) => {
+  res.json(publicExamGenerationState())
+})
+
+app.post('/api/exam-generation/files', uploadExamFiles.array('files', 24), (req, res) => {
+  const files = Array.isArray(req.files) ? req.files : []
+  if (files.length === 0) {
+    res.status(400).json({ error: 'No files uploaded.' })
+    return
+  }
+
+  const jobId = ++examGenerationJobId
+  const uploadedFiles = files.map((file) => ({
+    originalName: file.originalname,
+    path: file.path,
+    size: file.size,
+    mimetype: file.mimetype,
+    extension: path.extname(file.originalname).toLowerCase(),
+  }))
+  examGenerationState = {
+    status: 'processing',
+    phase: 'Queued',
+    fileCount: uploadedFiles.length,
+    files: uploadedFiles.map(({ originalName, size, extension }) => ({ name: originalName, size, extension })),
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    threadId: null,
+    generatedExamId: null,
+    generatedExamTitle: null,
+    questionCount: 0,
+    log: [examGenerationLogEntry('status', 'Queued exam generation.')],
+    error: null,
+  }
+  persistExamGenerationState()
+  void generatePersistentExam(jobId, uploadedFiles)
+  res.status(202).json(publicExamGenerationState())
+})
+
+app.delete('/api/exam-generation', (_req, res) => {
+  examGenerationJobId += 1
+  examGenerationState = emptyExamGenerationState()
+  persistExamGenerationState()
+  res.json(publicExamGenerationState())
+})
+
+app.get(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/, (req, res) => {
+  const [, rawExamId, rawFile] = req.path.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/i) ?? []
+  const examId = sanitizePathSegment(rawExamId)
+  const file = sanitizePathSegment(rawFile)
+  if (!examId || !file || !/\.(png|jpe?g)$/i.test(file)) {
+    console.warn('[generated-assets] invalid asset request', { path: req.path, examId, file })
+    res.status(404).send('File not found')
+    return
+  }
+  const filePath = path.join(generatedAssetsDir, examId, file)
+  res.sendFile(filePath, { dotfiles: 'allow' }, (error) => {
+    if (error) {
+      console.warn('[generated-assets] failed to send asset', { filePath, error: error.message })
+      res.status(404).send('File not found')
+    }
+  })
 })
 
 app.get('/api/file', (req, res) => {
@@ -264,6 +361,11 @@ function imagePathToInput(rawPath) {
 
 function resolveLocalImagePath(imagePath) {
   if (path.isAbsolute(imagePath)) return imagePath
+  if (/^\/api\/generated-assets\//i.test(imagePath)) {
+    const [, examId, file] = imagePath.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)$/i) ?? []
+    if (!examId || !file) return null
+    return path.join(generatedAssetsDir, sanitizePathSegment(examId), sanitizePathSegment(file))
+  }
   if (/^\/generated-assets\//i.test(imagePath)) {
     return path.join(appRoot, 'public', imagePath)
   }
@@ -807,6 +909,545 @@ function publicContextFile(file) {
     size: Number(file?.size) || 0,
     extension: typeof file?.extension === 'string' ? file.extension : '',
   }
+}
+
+function loadExamGenerationState() {
+  try {
+    const rawState = JSON.parse(fs.readFileSync(examGenerationStatePath, 'utf8'))
+    if (['processing', 'ready', 'error'].includes(rawState?.status)) {
+      return {
+        ...emptyExamGenerationState(),
+        ...rawState,
+        status: rawState.status === 'processing' ? 'error' : rawState.status,
+        phase: rawState.status === 'processing' ? 'Interrupted by server restart' : String(rawState.phase || ''),
+        error: rawState.status === 'processing'
+          ? 'Exam generation was interrupted by a server restart.'
+          : typeof rawState.error === 'string'
+            ? rawState.error
+            : null,
+        log: normalizeExamGenerationLog(rawState.log),
+        files: Array.isArray(rawState.files) ? rawState.files.map(publicContextFile) : [],
+      }
+    }
+  } catch {
+    // Missing local generation state is normal.
+  }
+  return emptyExamGenerationState()
+}
+
+function emptyExamGenerationState() {
+  return {
+    status: 'idle',
+    phase: '',
+    fileCount: 0,
+    files: [],
+    startedAt: null,
+    completedAt: null,
+    threadId: null,
+    generatedExamId: null,
+    generatedExamTitle: null,
+    questionCount: 0,
+    log: [],
+    error: null,
+  }
+}
+
+function persistExamGenerationState() {
+  fs.mkdirSync(contextDir, { recursive: true })
+  fs.writeFileSync(examGenerationStatePath, JSON.stringify(publicExamGenerationState(), null, 2))
+}
+
+function publicExamGenerationState() {
+  return {
+    status: examGenerationState.status,
+    phase: examGenerationState.phase || '',
+    fileCount: Number(examGenerationState.fileCount) || 0,
+    files: Array.isArray(examGenerationState.files) ? examGenerationState.files.map(publicContextFile) : [],
+    startedAt: examGenerationState.startedAt ?? null,
+    completedAt: examGenerationState.completedAt ?? null,
+    threadId: examGenerationState.threadId ?? null,
+    generatedExamId: examGenerationState.generatedExamId ?? null,
+    generatedExamTitle: examGenerationState.generatedExamTitle ?? null,
+    questionCount: Number(examGenerationState.questionCount) || 0,
+    log: normalizeExamGenerationLog(examGenerationState.log),
+    error: typeof examGenerationState.error === 'string' ? examGenerationState.error : null,
+  }
+}
+
+function setExamGenerationPhase(jobId, phase) {
+  if (jobId !== examGenerationJobId) return
+  examGenerationState = {
+    ...examGenerationState,
+    phase,
+  }
+  appendExamGenerationLog(jobId, 'status', phase)
+}
+
+function appendExamGenerationLog(jobId, kind, message, detail = '') {
+  if (jobId !== examGenerationJobId) return
+  const text = String(message || '').trim()
+  if (!text) return
+  examGenerationState = {
+    ...examGenerationState,
+    log: [
+      ...(Array.isArray(examGenerationState.log) ? examGenerationState.log : []),
+      examGenerationLogEntry(kind, text, detail),
+    ].slice(-400),
+  }
+  persistExamGenerationState()
+}
+
+function examGenerationLogEntry(kind, message, detail = '') {
+  return {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    kind: ['assistant', 'tool', 'status', 'error'].includes(kind) ? kind : 'status',
+    message: String(message || ''),
+    detail: String(detail || ''),
+  }
+}
+
+function normalizeExamGenerationLog(log) {
+  if (!Array.isArray(log)) return []
+  return log.slice(-400).map((entry) => {
+    if (typeof entry === 'string') {
+      return examGenerationLogEntry('status', entry)
+    }
+    return {
+      id: typeof entry?.id === 'string' ? entry.id : randomUUID(),
+      at: typeof entry?.at === 'string' ? entry.at : new Date().toISOString(),
+      kind: ['assistant', 'tool', 'status', 'error'].includes(entry?.kind) ? entry.kind : 'status',
+      message: typeof entry?.message === 'string' ? entry.message : '',
+      detail: typeof entry?.detail === 'string' ? entry.detail : '',
+    }
+  }).filter((entry) => entry.message.trim())
+}
+
+function mergedQuestionBank() {
+  const baseBank = readJsonFile(questionBankPath, { schema: null, generatedAt: null, sets: [] })
+  const generatedBank = loadGeneratedExamBank()
+  return {
+    ...baseBank,
+    generatedAt: new Date().toISOString(),
+    sets: [
+      ...(Array.isArray(baseBank.sets) ? baseBank.sets : []),
+      ...(Array.isArray(generatedBank.sets) ? generatedBank.sets : []),
+    ],
+  }
+}
+
+function loadGeneratedExamBank() {
+  const fallback = { generatedAt: null, sets: [] }
+  const bank = readJsonFile(generatedExamsPath, fallback)
+  return {
+    generatedAt: typeof bank.generatedAt === 'string' ? bank.generatedAt : null,
+    sets: Array.isArray(bank.sets) ? bank.sets : [],
+  }
+}
+
+function persistGeneratedExamSet(set) {
+  const bank = loadGeneratedExamBank()
+  const nextSets = [
+    ...bank.sets.filter((candidate) => candidate.id !== set.id),
+    set,
+  ]
+  fs.mkdirSync(contextDir, { recursive: true })
+  fs.writeFileSync(generatedExamsPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    sets: nextSets,
+  }, null, 2))
+}
+
+function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+async function generatePersistentExam(jobId, files) {
+  const examId = `generated-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`
+  const examAssetDir = path.join(generatedAssetsDir, examId)
+  try {
+    setExamGenerationPhase(jobId, 'Extracting lecture text')
+    const extractedFiles = await Promise.all(files.map(extractContextFile))
+    if (jobId !== examGenerationJobId) return
+
+    const usableFiles = extractedFiles.filter((file) => file.text.trim())
+    const failedFiles = extractedFiles.filter((file) => file.error)
+    if (usableFiles.length === 0) {
+      throw new Error([
+        'No usable text could be extracted from the selected files.',
+        ...failedFiles.map((file) => `${file.name}: ${file.error}`),
+      ].filter(Boolean).join('\n'))
+    }
+
+    fs.mkdirSync(examAssetDir, { recursive: true })
+    const baseBank = mergedQuestionBank()
+    setExamGenerationPhase(jobId, 'Starting Codex generation thread')
+    const generatedMarkdown = await generateExamWithCodex(jobId, {
+      examId,
+      examAssetDir,
+      usableFiles,
+      failedFiles,
+      baseBank,
+    })
+    if (jobId !== examGenerationJobId) return
+
+    setExamGenerationPhase(jobId, 'Validating generated exam')
+    const rawSet = extractGeneratedQuestionSet(generatedMarkdown)
+    const normalizedSet = normalizeGeneratedQuestionSet(rawSet, examId)
+    validateGeneratedExamAssets(normalizedSet, examId)
+    persistGeneratedExamSet(normalizedSet)
+
+    examGenerationState = {
+      ...examGenerationState,
+      status: 'ready',
+      phase: 'Generated exam ready',
+      completedAt: new Date().toISOString(),
+      generatedExamId: normalizedSet.id,
+      generatedExamTitle: normalizedSet.title,
+      questionCount: normalizedSet.questions.length,
+      error: failedFiles.length > 0
+        ? `Skipped ${failedFiles.length} file${failedFiles.length === 1 ? '' : 's'} with extraction errors.`
+        : null,
+    }
+    appendExamGenerationLog(jobId, 'status', `Generated "${normalizedSet.title}" with ${normalizedSet.questions.length} questions.`)
+    persistExamGenerationState()
+  } catch (error) {
+    if (jobId !== examGenerationJobId) return
+    examGenerationState = {
+      ...examGenerationState,
+      status: 'error',
+      phase: 'Generation failed',
+      completedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    }
+    appendExamGenerationLog(jobId, 'error', examGenerationState.error)
+    persistExamGenerationState()
+  }
+}
+
+async function generateExamWithCodex(jobId, { examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
+  const thread = await codex.request('thread/start', {
+    cwd: appRoot,
+    approvalPolicy: 'never',
+    sandbox: 'workspace-write',
+    ephemeral: true,
+    developerInstructions: `
+You generate high-quality TurboLearner exam question sets from course lecture material.
+For image-based questions, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available.
+Built-in image generation saves images under $CODEX_HOME/generated_images by default; copy the selected PNG/JPEG into the requested exam asset directory before returning JSON.
+You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
+Return the final question set JSON in one fenced json block after any work is complete.
+`.trim(),
+  })
+  if (jobId !== examGenerationJobId) return ''
+  examGenerationState = {
+    ...examGenerationState,
+    threadId: thread.thread.id,
+  }
+  persistExamGenerationState()
+  appendExamGenerationLog(jobId, 'status', `Codex thread: ${thread.thread.id}`)
+
+  let markdown = ''
+  await codex.startTurn({
+    threadId: thread.thread.id,
+    input: [{ type: 'text', text: buildExamGenerationPrompt({ examId, examAssetDir, usableFiles, failedFiles, baseBank }), text_elements: [] }],
+    cwd: appRoot,
+    approvalPolicy: 'never',
+    sandboxPolicy: { type: 'workspaceWrite', networkAccess: false },
+    timeoutMs: examGenerationTurnTimeoutMs,
+    onNotification: (message) => {
+      if (message.method === 'item/agentMessage/delta') {
+        const delta = message.params?.delta ?? ''
+        markdown += delta
+        appendExamGenerationLog(jobId, 'assistant', delta)
+      }
+      if (message.method === 'item/started') {
+        appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
+      }
+      if (message.method === 'item/completed') {
+        appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
+      }
+    },
+  })
+
+  const finalMarkdown = markdown.trim()
+  if (!finalMarkdown) throw new Error('Codex generated an empty exam response.')
+  return finalMarkdown
+}
+
+function summarizeCodexItem(item, prefix) {
+  const title = item?.title || item?.name || item?.type || 'Codex item'
+  return `${prefix}: ${title}`
+}
+
+function summarizeCodexItemDetail(item) {
+  if (!item || typeof item !== 'object') return ''
+  const parts = []
+  if (typeof item.command === 'string') parts.push(item.command)
+  if (Array.isArray(item.args)) parts.push(item.args.join(' '))
+  if (typeof item.path === 'string') parts.push(item.path)
+  if (typeof item.status === 'string') parts.push(item.status)
+  return parts.filter(Boolean).join(' · ')
+}
+
+function buildExamGenerationPrompt({ examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
+  const styleBank = {
+    schema: baseBank.schema,
+    sets: (baseBank.sets ?? []).map((set) => ({
+      id: set.id,
+      title: set.title,
+      description: set.description,
+      questions: set.questions,
+    })),
+  }
+  const extractionNotes = failedFiles.length > 0
+    ? failedFiles.map((file) => `- ${file.name}: ${file.error}`).join('\n')
+    : 'none'
+
+  return `
+Generate one new TurboLearner exam question set.
+
+Exam id to use exactly: ${examId}
+Asset directory for any generated PNG/JPEG images: ${examAssetDir}
+Image URL prefix for generated images: /api/generated-assets/${examId}/
+
+Output contract:
+- Return exactly one JSON object for a TurboLearner question set, not a full bank.
+- Put the final JSON inside a fenced \`\`\`json block.
+- The object must have: id, title, description, sourcePath, questions.
+- Use a concise title, preferably "Generated Exam N" or "Generated ML Exam".
+- Use a very short description, maximum 8 words. Do not enumerate all topics in the description.
+- Every question must follow schema version 2 from the examples.
+- Use setId "${examId}" on every question.
+- Use source "Generated Exam".
+- Use answer.source "inferred" for every generated answer.
+- For open questions, options must be [] and answer.expectedText must contain the rubric/model answer.
+- For normal single-choice MCQs, use exactly 4 options.
+- For true/false or yes/no single-choice questions, use exactly 2 options.
+- Do not force true/false questions into 4 options.
+- For multi-select questions, use 3-5 options.
+- For single/multiple questions, answer.correctOptionIds must contain canonical option ids.
+- Include correctOptionIds legacy mirror for choice questions.
+- Avoid making correct answers longer, more specific, or stylistically different than distractors.
+- Make questions non-trivial, course-grounded, and hard to guess.
+- Include grouped questions where the source exam style supports them.
+- Include code examples and image-based questions where course material supports them.
+
+Image requirements:
+- Do not output SVG.
+- If a question needs a diagram/chart/graph, use the built-in imagegen skill / image_gen tool to create a polished raster PNG/JPEG.
+- Do not use Matplotlib for generated exam images unless imagegen is unavailable and the question would otherwise have to be dropped.
+- After imagegen creates an image under $CODEX_HOME/generated_images, copy the selected output into the asset directory.
+- Use local shell commands only to create directories, copy imagegen output, inspect files, and verify that referenced PNG/JPEG assets exist.
+- Reference images in prompts as <image>/api/generated-assets/${examId}/filename.png</image>.
+- Include the same URL in imagePaths.
+- Filenames must not reveal the answer.
+
+Quality requirements:
+- Match the existing exams' style, phrasing, grouping, point values, and difficulty.
+- Infer exam length and type mix from all style examples.
+- Cover the selected lecture material broadly without adding topics not evidenced by lectures.
+- Repeating important concepts is allowed and useful for spaced practice.
+- When repeating a concept from an existing exam, test it from a fresh angle with different phrasing, scenario, code bug, numeric setup, diagram, or option pattern.
+- Use existing exams as schema/style references, not as templates to paraphrase.
+- Do not clone the same surface scenario, code bug, diagram concept, numeric setup, or option pattern from the examples.
+- Prefer lecture-covered concepts and angles that are underrepresented in the existing examples.
+- Code questions should vary the implementation mistakes they test; do not repeatedly use the same precision/recall/F1 bug unless the lecture material makes that repetition necessary.
+- Before finalizing each question, check whether it is testing a new angle or merely rewording an example; replace it if it is merely a rewording.
+- Include math/code tags using TurboLearner syntax when useful.
+
+Extraction notes:
+${extractionNotes}
+
+Existing style/schema examples:
+${JSON.stringify(styleBank, null, 2)}
+
+Selected lecture text:
+${usableFiles.map((file) => `
+--- BEGIN FILE: ${file.name} ---
+${file.text}
+--- END FILE: ${file.name} ---
+`).join('\n')}
+`.trim()
+}
+
+function extractGeneratedQuestionSet(markdown) {
+  const fenced = [...markdown.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+    .map((match) => match[1].trim())
+    .reverse()
+    .find((block) => block.startsWith('{'))
+  const rawJson = fenced || markdown.slice(markdown.indexOf('{'), markdown.lastIndexOf('}') + 1)
+  if (!rawJson.trim()) throw new Error('Could not find generated exam JSON in Codex response.')
+  try {
+    const parsed = JSON.parse(rawJson)
+    if (Array.isArray(parsed?.sets)) return parsed.sets[0]
+    return parsed
+  } catch (error) {
+    throw new Error(`Generated exam JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function normalizeGeneratedQuestionSet(rawSet, examId) {
+  if (!rawSet || typeof rawSet !== 'object') throw new Error('Generated exam is not an object.')
+  const questions = Array.isArray(rawSet.questions) ? rawSet.questions : []
+  if (questions.length === 0) throw new Error('Generated exam contains no questions.')
+
+  const set = {
+    id: examId,
+    title: nonEmptyString(rawSet.title, 'Generated Exam'),
+    description: nonEmptyString(rawSet.description, 'Codex-generated practice exam.'),
+    sourcePath: '.turbolearner/generated-exams.json',
+    questions: questions.map((question, index) => normalizeGeneratedQuestion(question, examId, index)),
+  }
+  validateQuestionSetShape(set)
+  return set
+}
+
+function normalizeGeneratedQuestion(question, examId, index) {
+  if (!question || typeof question !== 'object') throw new Error(`Question ${index + 1} is not an object.`)
+  const type = ['single', 'multiple', 'open'].includes(question.type) ? question.type : null
+  if (!type) throw new Error(`Question ${index + 1} has invalid type.`)
+  const number = nonEmptyString(question.number, String(index + 1))
+  const id = stableId(question.id, `${examId}-q${slugQuestionNumber(number) || index + 1}`)
+  const options = type === 'open'
+    ? []
+    : normalizeOptions(question.options, id, type)
+  const answer = normalizeGeneratedAnswer(question.answer, question, options, type, id)
+
+  return {
+    id,
+    setId: examId,
+    source: 'Generated Exam',
+    number,
+    title: nonEmptyString(question.title, `Question ${number}`),
+    type,
+    prompt: nonEmptyString(question.prompt, ''),
+    ...(Number.isFinite(Number(question.points)) ? { points: Number(question.points) } : {}),
+    options,
+    answer,
+    ...(answer.correctOptionIds ? { correctOptionIds: answer.correctOptionIds } : {}),
+    ...(typeof question.expectedAnswer === 'string' ? { expectedAnswer: question.expectedAnswer } : {}),
+    ...(Array.isArray(question.imagePaths) ? { imagePaths: question.imagePaths.map(String) } : {}),
+    ...(question.groupId ? { groupId: stableId(question.groupId, `${examId}-group-${index + 1}`) } : {}),
+    ...(typeof question.groupTitle === 'string' ? { groupTitle: question.groupTitle } : {}),
+    ...(typeof question.groupPrompt === 'string' ? { groupPrompt: question.groupPrompt } : {}),
+    ...(Number.isInteger(question.groupOrder) ? { groupOrder: question.groupOrder } : {}),
+    ...(Array.isArray(question.concepts) ? { concepts: question.concepts.map((concept) => stableId(concept, 'concept')).filter(Boolean) } : { concepts: [] }),
+  }
+}
+
+function normalizeOptions(options, questionId, type) {
+  if (!Array.isArray(options)) throw new Error(`${questionId} is missing options.`)
+  if (type === 'single' && options.length !== 4 && !(options.length === 2 && isBinaryChoiceOptions(options))) {
+    throw new Error(`${questionId} must have exactly 4 options, or 2 options for true/false or yes/no questions.`)
+  }
+  if (type === 'multiple' && (options.length < 3 || options.length > 5)) {
+    throw new Error(`${questionId} must have 3-5 options.`)
+  }
+  return options.map((option, index) => ({
+    id: nonEmptyString(option?.id, String.fromCharCode(65 + index)),
+    text: nonEmptyString(option?.text, ''),
+  }))
+}
+
+function normalizeGeneratedAnswer(answer, question, options, type, questionId) {
+  const rawCorrectIds =
+    Array.isArray(answer?.correctOptionIds) ? answer.correctOptionIds :
+      Array.isArray(question.correctOptionIds) ? question.correctOptionIds :
+        null
+  const correctOptionIds = type === 'open'
+    ? null
+    : uniqueStrings(rawCorrectIds?.map(String) ?? []).filter((id) => options.some((option) => option.id === id))
+  if (type !== 'open' && correctOptionIds.length === 0) {
+    throw new Error(`${questionId} is missing a valid answer.correctOptionIds array.`)
+  }
+
+  return {
+    correctOptionIds: type === 'open' ? null : correctOptionIds,
+    expectedText: type === 'open'
+      ? nonEmptyString(answer?.expectedText ?? question.expectedAnswer, '')
+      : (typeof answer?.expectedText === 'string' ? answer.expectedText : null),
+    source: 'inferred',
+  }
+}
+
+function validateQuestionSetShape(set) {
+  for (const question of set.questions) {
+    const required = ['id', 'setId', 'source', 'number', 'title', 'type', 'prompt', 'options', 'answer']
+    for (const field of required) {
+      if (!(field in question)) throw new Error(`${question.id || 'Question'} is missing ${field}.`)
+    }
+    if (question.type === 'open' && question.options.length !== 0) {
+      throw new Error(`${question.id} is open but has options.`)
+    }
+    if (question.type === 'single' && question.options.length !== 4 && !(question.options.length === 2 && isBinaryChoiceOptions(question.options))) {
+      throw new Error(`${question.id} must have exactly 4 options, or 2 options for true/false or yes/no questions.`)
+    }
+    if (question.type === 'multiple' && (question.options.length < 3 || question.options.length > 5)) {
+      throw new Error(`${question.id} must have 3-5 options.`)
+    }
+  }
+}
+
+function isBinaryChoiceOptions(options) {
+  const labels = options.map((option) => String(option?.text ?? '').trim().toLowerCase())
+  const normalized = new Set(labels)
+  return (
+    normalized.size === 2 &&
+    (
+      (normalized.has('true') && normalized.has('false')) ||
+      (normalized.has('yes') && normalized.has('no'))
+    )
+  )
+}
+
+function validateGeneratedExamAssets(set, examId) {
+  const expectedPrefix = `/api/generated-assets/${examId}/`
+  for (const question of set.questions) {
+    const paths = [
+      ...extractImageTags(question.prompt),
+      ...(Array.isArray(question.imagePaths) ? question.imagePaths : []),
+      ...(question.groupPrompt ? extractImageTags(question.groupPrompt) : []),
+    ]
+    for (const imagePath of paths) {
+      if (!imagePath.startsWith(expectedPrefix)) continue
+      const file = sanitizePathSegment(imagePath.slice(expectedPrefix.length))
+      const diskPath = path.join(generatedAssetsDir, examId, file)
+      if (!/\.(png|jpe?g)$/i.test(file)) throw new Error(`${question.id} references a non-PNG/JPEG generated image.`)
+      if (!fs.existsSync(diskPath)) throw new Error(`${question.id} references missing generated image: ${imagePath}`)
+    }
+  }
+}
+
+function nonEmptyString(value, fallback) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text) return text
+  if (fallback) return fallback
+  throw new Error('Generated exam contains an empty required string.')
+}
+
+function stableId(value, fallback) {
+  const text = String(value || fallback || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+  return text || fallback
+}
+
+function slugQuestionNumber(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function sanitizePathSegment(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9._-]/g, '')
 }
 
 async function generatePersistentContext(jobId, files) {
