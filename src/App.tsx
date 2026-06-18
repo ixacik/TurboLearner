@@ -1679,6 +1679,7 @@ const TrainerPanel = memo(function TrainerPanel({
                 openAnswerState={getOpenAnswerState(currentUnit, question, result)}
                 revealedCorrectOptionIds={revealedCorrectOptionIdsByQuestion[question.id] ?? []}
                 showHeading={currentUnit.questions.length > 1}
+                sharedPrompt={currentUnit.sharedPrompt ?? ''}
                 onToggleOption={onToggleOption}
                 onOpenAnswerChange={onOpenAnswerChange}
               />
@@ -2295,6 +2296,7 @@ const QuestionPrompt = memo(function QuestionPrompt({
   openAnswerState,
   revealedCorrectOptionIds,
   showHeading,
+  sharedPrompt,
   onToggleOption,
   onOpenAnswerChange,
 }: {
@@ -2305,6 +2307,7 @@ const QuestionPrompt = memo(function QuestionPrompt({
   openAnswerState: 'correct' | 'partial' | 'incorrect' | null
   revealedCorrectOptionIds: string[]
   showHeading: boolean
+  sharedPrompt: string
   onToggleOption: (question: Question, optionId: string) => void
   onOpenAnswerChange: (questionId: string, text: string) => void
 }) {
@@ -2314,6 +2317,10 @@ const QuestionPrompt = memo(function QuestionPrompt({
     ? revealedCorrectOptionIds
     : getCorrectOptionIds(question)
   const hasKnownCorrectOptionIds = correctOptionIds.length > 0
+  const displayPrompt = useMemo(
+    () => removeSharedImageTags(question.prompt, sharedPrompt),
+    [question.prompt, sharedPrompt],
+  )
 
   useLayoutEffect(() => {
     const textarea = openAnswerTextareaRef.current
@@ -2335,7 +2342,7 @@ const QuestionPrompt = memo(function QuestionPrompt({
           {question.points ? <small>{question.points}p</small> : null}
         </div>
       )}
-      <MarkdownBlock className="question-prose">{question.prompt}</MarkdownBlock>
+      <MarkdownBlock className="question-prose">{displayPrompt}</MarkdownBlock>
       {question.type === 'open' ? (
         <textarea
           ref={openAnswerTextareaRef}
@@ -2810,9 +2817,9 @@ function TrashIcon() {
 function ThreeDotIcon() {
   return (
     <svg className="three-dot-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="5" r="1.8" />
+      <circle cx="5" cy="12" r="1.8" />
       <circle cx="12" cy="12" r="1.8" />
-      <circle cx="12" cy="19" r="1.8" />
+      <circle cx="19" cy="12" r="1.8" />
     </svg>
   )
 }
@@ -3119,6 +3126,29 @@ function normalizeQuestionMarkup(markup: string) {
       if (!path) return ''
       return `\n\n![Question attachment](${encodeMarkdownUrl(path)})\n\n`
     })
+}
+
+function removeSharedImageTags(prompt: string, sharedPrompt: string) {
+  const sharedImages = new Set(extractQuestionImageTags(sharedPrompt))
+  if (sharedImages.size === 0) return prompt
+
+  return prompt
+    .replace(/<image>([\s\S]*?)<\/image>/gi, (tag, rawPath: string) => {
+      const imagePath = rawPath.trim()
+      return sharedImages.has(imagePath) ? '' : tag
+    })
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function extractQuestionImageTags(markup: string) {
+  const paths: string[] = []
+  markup.replace(/<image>([\s\S]*?)<\/image>/gi, (_, rawPath: string) => {
+    const imagePath = rawPath.trim()
+    if (imagePath) paths.push(imagePath)
+    return ''
+  })
+  return paths
 }
 
 function normalizeChatMarkdown(markup: string) {

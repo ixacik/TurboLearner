@@ -8,6 +8,11 @@ import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import {
+  buildExamDraftGenerationPrompt,
+  buildExamReviewPrompt,
+  createExamGenerationPromptContext,
+} from './examGenerationHelpers.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appRoot = path.resolve(__dirname, '..')
@@ -2245,18 +2250,31 @@ async function generatePersistentExam(jobId, files) {
 
     fs.mkdirSync(examAssetDir, { recursive: true })
     const baseBank = mergedQuestionBank()
-    setExamGenerationPhase(jobId, 'Starting Codex generation thread')
-    const generatedMarkdown = await generateExamWithCodex(jobId, {
+    const promptContext = createExamGenerationPromptContext(baseBank)
+    setExamGenerationPhase(jobId, 'Generating draft exam')
+    const draftMarkdown = await generateExamDraftWithCodex(jobId, {
       examId,
       examAssetDir,
       usableFiles,
       failedFiles,
-      baseBank,
+      promptContext,
     })
     if (jobId !== examGenerationJobId) return
 
-    setExamGenerationPhase(jobId, 'Validating generated exam')
-    const rawSet = extractGeneratedQuestionSet(generatedMarkdown)
+    const draftSet = extractGeneratedQuestionSet(draftMarkdown)
+    setExamGenerationPhase(jobId, 'Reviewing and repairing draft exam')
+    const finalMarkdown = await reviewAndRepairGeneratedExamWithCodex(jobId, {
+      examId,
+      examAssetDir,
+      usableFiles,
+      failedFiles,
+      promptContext,
+      draftSet,
+    })
+    if (jobId !== examGenerationJobId) return
+
+    setExamGenerationPhase(jobId, 'Validating reviewed exam')
+    const rawSet = extractGeneratedQuestionSet(finalMarkdown)
     const normalizedSet = normalizeGeneratedQuestionSet(rawSet, examId)
     validateGeneratedExamAssets(normalizedSet, examId)
     persistGeneratedExamSet(normalizedSet)
@@ -2342,19 +2360,33 @@ async function generatePersistentExamForTopic(topicId, jobId) {
 
     fs.mkdirSync(examAssetDir, { recursive: true })
     const baseBank = topicQuestionBank(topicId)
-    setTopicExamGenerationPhase(topicId, jobId, 'Starting Codex generation thread')
-    const generatedMarkdown = await generateExamWithCodex(jobId, {
+    const promptContext = createExamGenerationPromptContext(baseBank)
+    setTopicExamGenerationPhase(topicId, jobId, 'Generating draft exam')
+    const draftMarkdown = await generateExamDraftWithCodex(jobId, {
       topicId,
       examId,
       examAssetDir,
       usableFiles,
       failedFiles,
-      baseBank,
+      promptContext,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
-    setTopicExamGenerationPhase(topicId, jobId, 'Validating generated exam')
-    const rawSet = extractGeneratedQuestionSet(generatedMarkdown)
+    const draftSet = extractGeneratedQuestionSet(draftMarkdown)
+    setTopicExamGenerationPhase(topicId, jobId, 'Reviewing and repairing draft exam')
+    const finalMarkdown = await reviewAndRepairGeneratedExamWithCodex(jobId, {
+      topicId,
+      examId,
+      examAssetDir,
+      usableFiles,
+      failedFiles,
+      promptContext,
+      draftSet,
+    })
+    if (topicExamGenerationJobs.get(topicId) !== jobId) return
+
+    setTopicExamGenerationPhase(topicId, jobId, 'Validating reviewed exam')
+    const rawSet = extractGeneratedQuestionSet(finalMarkdown)
     const normalizedSet = normalizeGeneratedQuestionSet(rawSet, examId, topicId)
     validateGeneratedExamAssets(normalizedSet, examId, topicId)
     persistGeneratedExamSetForTopic(topicId, normalizedSet)
@@ -2381,35 +2413,75 @@ async function generatePersistentExamForTopic(topicId, jobId) {
   }
 }
 
-async function generateExamWithCodex(jobId, { topicId = null, examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
+async function generateExamDraftWithCodex(jobId, { topicId = null, examId, examAssetDir, usableFiles, failedFiles, promptContext }) {
+  return runExamCodexTurn(jobId, {
+    topicId,
+    phaseLabel: 'Draft',
+    developerInstructions: `
+You generate high-quality TurboLearner exam question set drafts from course lecture material.
+For image-based questions, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available.
+Built-in image generation saves images under $CODEX_HOME/generated_images by default; copy the selected PNG/JPEG into the requested exam asset directory before returning JSON.
+You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
+Return the draft question set JSON in one fenced json block after any work is complete.
+`.trim(),
+    prompt: buildExamDraftGenerationPrompt({
+      topicId,
+      examId,
+      examAssetDir,
+      usableFiles,
+      failedFiles,
+      promptContext,
+    }),
+  })
+}
+
+async function reviewAndRepairGeneratedExamWithCodex(jobId, { topicId = null, examId, examAssetDir, usableFiles, failedFiles, promptContext, draftSet }) {
+  return runExamCodexTurn(jobId, {
+    topicId,
+    phaseLabel: 'Review',
+    developerInstructions: `
+You are a strict TurboLearner exam reviewer and editor.
+Review the draft against lecture material, real-exam style examples, and all prior-exam coverage history.
+Rewrite, replace, and repair the draft directly. Do not merely critique it.
+For any new image-based replacement question, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available, then copy the selected PNG/JPEG into the requested exam asset directory.
+You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
+Return only the corrected final question set JSON in one fenced json block after any work is complete.
+`.trim(),
+    prompt: buildExamReviewPrompt({
+      topicId,
+      examId,
+      examAssetDir,
+      usableFiles,
+      failedFiles,
+      promptContext,
+      draftSet,
+    }),
+  })
+}
+
+async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerInstructions, prompt }) {
   const thread = await codex.request('thread/start', {
     cwd: appRoot,
     approvalPolicy: 'never',
     sandbox: 'workspace-write',
     ephemeral: true,
-    developerInstructions: `
-You generate high-quality TurboLearner exam question sets from course lecture material.
-For image-based questions, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available.
-Built-in image generation saves images under $CODEX_HOME/generated_images by default; copy the selected PNG/JPEG into the requested exam asset directory before returning JSON.
-You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
-Return the final question set JSON in one fenced json block after any work is complete.
-`.trim(),
+    developerInstructions,
   })
   if (!isExamJobCurrent(topicId, jobId)) return ''
-  if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'status', `Codex thread: ${thread.thread.id}`)
+  if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'status', `${phaseLabel} Codex thread: ${thread.thread.id}`)
   else {
     examGenerationState = {
       ...examGenerationState,
       threadId: thread.thread.id,
     }
     persistExamGenerationState()
-    appendExamGenerationLog(jobId, 'status', `Codex thread: ${thread.thread.id}`)
+    appendExamGenerationLog(jobId, 'status', `${phaseLabel} Codex thread: ${thread.thread.id}`)
   }
 
   let markdown = ''
   await codex.startTurn({
     threadId: thread.thread.id,
-    input: [{ type: 'text', text: buildExamGenerationPrompt({ topicId, examId, examAssetDir, usableFiles, failedFiles, baseBank }), text_elements: [] }],
+    input: [{ type: 'text', text: prompt, text_elements: [] }],
     cwd: appRoot,
     approvalPolicy: 'never',
     sandboxPolicy: { type: 'workspaceWrite', networkAccess: false },
@@ -2433,7 +2505,7 @@ Return the final question set JSON in one fenced json block after any work is co
   })
 
   const finalMarkdown = markdown.trim()
-  if (!finalMarkdown) throw new Error('Codex generated an empty exam response.')
+  if (!finalMarkdown) throw new Error(`${phaseLabel} Codex thread generated an empty exam response.`)
   return finalMarkdown
 }
 
@@ -2455,90 +2527,6 @@ function summarizeCodexItemDetail(item) {
   if (typeof item.path === 'string') parts.push(item.path)
   if (typeof item.status === 'string') parts.push(item.status)
   return parts.filter(Boolean).join(' · ')
-}
-
-function buildExamGenerationPrompt({ topicId = null, examId, examAssetDir, usableFiles, failedFiles, baseBank }) {
-  const styleBank = {
-    schema: baseBank.schema,
-    sets: (baseBank.sets ?? []).map((set) => ({
-      id: set.id,
-      title: set.title,
-      description: set.description,
-      questions: set.questions,
-    })),
-  }
-  const extractionNotes = failedFiles.length > 0
-    ? failedFiles.map((file) => `- ${file.name}: ${file.error}`).join('\n')
-    : 'none'
-  const imageUrlPrefix = topicId
-    ? `/api/generated-assets/${topicId}/${examId}/`
-    : `/api/generated-assets/${examId}/`
-
-  return `
-Generate one new TurboLearner exam question set.
-
-Exam id to use exactly: ${examId}
-Asset directory for any generated PNG/JPEG images: ${examAssetDir}
-Image URL prefix for generated images: ${imageUrlPrefix}
-
-Output contract:
-- Return exactly one JSON object for a TurboLearner question set, not a full bank.
-- Put the final JSON inside a fenced \`\`\`json block.
-- The object must have: id, title, description, sourcePath, questions.
-- Use a concise title, preferably "Generated Exam N" or "Generated ML Exam".
-- Use a very short description, maximum 8 words. Do not enumerate all topics in the description.
-- Every question must follow schema version 2 from the examples.
-- Use setId "${examId}" on every question.
-- Use source "Generated Exam".
-- Use answer.source "inferred" for every generated answer.
-- For open questions, options must be [] and answer.expectedText must contain the rubric/model answer.
-- For normal single-choice MCQs, use exactly 4 options.
-- For true/false or yes/no single-choice questions, use exactly 2 options.
-- Do not force true/false questions into 4 options.
-- For multi-select questions, use 3-5 options.
-- For single/multiple questions, answer.correctOptionIds must contain canonical option ids.
-- Include correctOptionIds legacy mirror for choice questions.
-- Avoid making correct answers longer, more specific, or stylistically different than distractors.
-- Make questions non-trivial, course-grounded, and hard to guess.
-- Include grouped questions where the source exam style supports them.
-- Include code examples and image-based questions where course material supports them.
-
-Image requirements:
-- Do not output SVG.
-- If a question needs a diagram/chart/graph, use the built-in imagegen skill / image_gen tool to create a polished raster PNG/JPEG.
-- Do not use Matplotlib for generated exam images unless imagegen is unavailable and the question would otherwise have to be dropped.
-- After imagegen creates an image under $CODEX_HOME/generated_images, copy the selected output into the asset directory.
-- Use local shell commands only to create directories, copy imagegen output, inspect files, and verify that referenced PNG/JPEG assets exist.
-- Reference images in prompts as <image>${imageUrlPrefix}filename.png</image>.
-- Include the same URL in imagePaths.
-- Filenames must not reveal the answer.
-
-Quality requirements:
-- Match the existing exams' style, phrasing, grouping, point values, and difficulty.
-- Infer exam length and type mix from all style examples.
-- Cover the selected lecture material broadly without adding topics not evidenced by lectures.
-- Repeating important concepts is allowed and useful for spaced practice.
-- When repeating a concept from an existing exam, test it from a fresh angle with different phrasing, scenario, code bug, numeric setup, diagram, or option pattern.
-- Use existing exams as schema/style references, not as templates to paraphrase.
-- Do not clone the same surface scenario, code bug, diagram concept, numeric setup, or option pattern from the examples.
-- Prefer lecture-covered concepts and angles that are underrepresented in the existing examples.
-- Code questions should vary the implementation mistakes they test; do not repeatedly use the same precision/recall/F1 bug unless the lecture material makes that repetition necessary.
-- Before finalizing each question, check whether it is testing a new angle or merely rewording an example; replace it if it is merely a rewording.
-- Include math/code tags using TurboLearner syntax when useful.
-
-Extraction notes:
-${extractionNotes}
-
-Existing style/schema examples:
-${JSON.stringify(styleBank, null, 2)}
-
-Selected lecture text:
-${usableFiles.map((file) => `
---- BEGIN FILE: ${file.name} ---
-${file.text}
---- END FILE: ${file.name} ---
-`).join('\n')}
-`.trim()
 }
 
 function extractGeneratedQuestionSet(markdown) {
@@ -2585,6 +2573,8 @@ function normalizeGeneratedQuestion(question, examId, index) {
     ? []
     : normalizeOptions(question.options, id, type)
   const answer = normalizeGeneratedAnswer(question.answer, question, options, type, id)
+  const groupPrompt = typeof question.groupPrompt === 'string' ? question.groupPrompt : ''
+  const prompt = removeSharedImageTags(nonEmptyString(question.prompt, ''), groupPrompt)
 
   return {
     id,
@@ -2593,7 +2583,7 @@ function normalizeGeneratedQuestion(question, examId, index) {
     number,
     title: nonEmptyString(question.title, `Question ${number}`),
     type,
-    prompt: nonEmptyString(question.prompt, ''),
+    prompt: nonEmptyString(prompt, nonEmptyString(question.prompt, '')),
     ...(Number.isFinite(Number(question.points)) ? { points: Number(question.points) } : {}),
     options,
     answer,
@@ -2602,7 +2592,7 @@ function normalizeGeneratedQuestion(question, examId, index) {
     ...(Array.isArray(question.imagePaths) ? { imagePaths: question.imagePaths.map(String) } : {}),
     ...(question.groupId ? { groupId: stableId(question.groupId, `${examId}-group-${index + 1}`) } : {}),
     ...(typeof question.groupTitle === 'string' ? { groupTitle: question.groupTitle } : {}),
-    ...(typeof question.groupPrompt === 'string' ? { groupPrompt: question.groupPrompt } : {}),
+    ...(groupPrompt ? { groupPrompt } : {}),
     ...(Number.isInteger(question.groupOrder) ? { groupOrder: question.groupOrder } : {}),
     ...(Array.isArray(question.concepts) ? { concepts: question.concepts.map((concept) => stableId(concept, 'concept')).filter(Boolean) } : { concepts: [] }),
   }
@@ -2693,6 +2683,19 @@ function validateGeneratedExamAssets(set, examId, topicId = null) {
       if (!fs.existsSync(diskPath)) throw new Error(`${question.id} references missing generated image: ${imagePath}`)
     }
   }
+}
+
+function removeSharedImageTags(prompt, sharedPrompt) {
+  const sharedImages = new Set(extractImageTags(sharedPrompt))
+  if (sharedImages.size === 0) return prompt
+
+  return String(prompt || '')
+    .replace(/<image>([\s\S]*?)<\/image>/gi, (tag, rawPath) => {
+      const imagePath = String(rawPath).trim()
+      return sharedImages.has(imagePath) ? '' : tag
+    })
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function nonEmptyString(value, fallback) {
