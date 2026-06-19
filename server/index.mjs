@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import {
   assertGeneratedChoiceAnswerDistribution,
+  assertGeneratedMultiSelectAnswerVariety,
   buildExamDraftGenerationPrompt,
   buildExamReviewPrompt,
   createExamGenerationPromptContext,
@@ -3182,6 +3183,7 @@ function normalizeGeneratedQuestionSet(rawSet, examId, topicId = null) {
     questions: questions.map((question, index) => normalizeGeneratedQuestion(question, examId, index)),
   }
   validateQuestionSetShape(set)
+  assertGeneratedMultiSelectAnswerVariety(set.questions)
   return set
 }
 

@@ -96,7 +96,7 @@ ${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 Review rubric:
 - Replace or rewrite questions that are near-duplicates of any prior real or generated question.
 - Remove pure spinoffs that keep the same scenario, wording, code bug, diagram setup, numeric setup, or option pattern.
-- Fix multi-select questions where all options are correct or no options are correct.
+- Fix multi-select questions where no options are correct, and avoid making the number of correct options predictable across the set.
 - Replace questions that ask what happened in the lecture, what was shown in the lecture, or what matches a lecture derivation/example.
 - Reject lecture-memorization trivia: slide-specific examples, exact classroom walkthroughs, toy numbers, professor phrasing, or derivation steps unless real exams clearly test that exact math depth.
 - Fix obvious answers, weak distractors, answer-length tells, malformed rubrics, shallow prompts, unsupported lecture claims, and inconsistent answer keys.
@@ -139,9 +139,9 @@ Shared question-set guidelines:
 - For true/false or yes/no single-choice questions, use exactly 2 options.
 - Do not force true/false questions into 4 options.
 - For multi-select questions, use 3-5 options.
-- Multi-select questions must have at least one correct option and at least one incorrect option.
-- Never make every multi-select option correct; if every statement is true, rewrite one or more distractors so they are plausibly false.
-- If only one option is correct, consider making it a single-choice question, but this is not required when the question wording reasonably allows multiple answers.
+- Multi-select questions may have any number of correct options from exactly one through all options.
+- All-correct and single-correct multi-select questions are valid when the prompt naturally asks the learner to evaluate every option.
+- Across a generated set, avoid making the number of correct options predictable.
 - For single/multiple questions, answer.correctOptionIds must contain canonical option ids.
 - Include correctOptionIds legacy mirror for choice questions.
 - Avoid making correct answers longer, more specific, or stylistically different than distractors.
@@ -199,8 +199,39 @@ Shared quality requirements:
 export function assertGeneratedChoiceAnswerDistribution({ questionId, type, options, correctOptionIds }) {
   if (type !== 'multiple') return
 
-  if (correctOptionIds.length >= options.length) {
-    throw new Error(`${questionId} is multi-select but every option is correct; include at least one plausible incorrect option.`)
+  if (correctOptionIds.length < 1 || correctOptionIds.length > options.length) {
+    throw new Error(`${questionId} has an invalid multi-select answer count.`)
+  }
+}
+
+export function assertGeneratedMultiSelectAnswerVariety(questions) {
+  const multiSelects = (Array.isArray(questions) ? questions : [])
+    .filter((question) => question?.type === 'multiple')
+    .map((question) => {
+      const correctOptionIds = Array.isArray(question?.answer?.correctOptionIds)
+        ? question.answer.correctOptionIds
+        : Array.isArray(question?.correctOptionIds)
+          ? question.correctOptionIds
+          : []
+      return {
+        id: question?.id || question?.number || 'multi-select question',
+        optionCount: Array.isArray(question?.options) ? question.options.length : 0,
+        correctCount: correctOptionIds.length,
+      }
+    })
+
+  if (multiSelects.length < 3) return
+
+  const counts = countBy(multiSelects.map((question) => `${question.correctCount}/${question.optionCount}`))
+  const [dominantPattern, dominantCount] = Object.entries(counts)
+    .sort(([, countA], [, countB]) => countB - countA)[0] ?? []
+  if (!dominantPattern || dominantCount < 3) return
+
+  const dominanceRatio = dominantCount / multiSelects.length
+  if (dominanceRatio >= 0.75) {
+    throw new Error(
+      `Generated multi-select answer counts are too predictable: ${dominantCount}/${multiSelects.length} use ${dominantPattern} correct options.`,
+    )
   }
 }
 

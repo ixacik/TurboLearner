@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import {
   assertGeneratedChoiceAnswerDistribution,
+  assertGeneratedMultiSelectAnswerVariety,
   buildExamDraftGenerationPrompt,
   buildExamReviewPrompt,
   createExamGenerationPromptContext,
@@ -117,8 +118,10 @@ test('draft and review prompts distinguish style examples from coverage history'
   assert.match(draftPrompt, /Shared question-set guidelines:/)
   assert.match(reviewPrompt, /Shared question-set guidelines:/)
   assert.match(draftPrompt, /Generated prior exams are coverage history only|Do not imitate generated exams' style/)
-  assert.match(draftPrompt, /Multi-select questions must have at least one correct option and at least one incorrect option/)
-  assert.match(draftPrompt, /Never make every multi-select option correct/)
+  assert.match(draftPrompt, /Multi-select questions may have any number of correct options from exactly one through all options/)
+  assert.match(draftPrompt, /All-correct and single-correct multi-select questions are valid/)
+  assert.doesNotMatch(draftPrompt, /at least one incorrect option/)
+  assert.doesNotMatch(draftPrompt, /consider making it a single-choice question/)
   assert.match(draftPrompt, /do not repeat that same <image> in child prompts/)
   assert.match(draftPrompt, /Do not ask what happened in the lecture/)
   assert.match(draftPrompt, /Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level/)
@@ -131,7 +134,8 @@ test('draft and review prompts distinguish style examples from coverage history'
   assert.match(reviewPrompt, /Do not ask what happened in the lecture/)
   assert.match(reviewPrompt, /Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level/)
   assert.match(reviewPrompt, /remove duplicate child-level <image> tags/)
-  assert.match(reviewPrompt, /Fix multi-select questions where all options are correct/)
+  assert.match(reviewPrompt, /Fix multi-select questions where no options are correct/)
+  assert.doesNotMatch(reviewPrompt, /where all options are correct or no options are correct/)
   assert.match(reviewPrompt, /Replace questions that ask what happened in the lecture/)
   assert.match(reviewPrompt, /Reject lecture-memorization trivia/)
 })
@@ -248,7 +252,7 @@ test('public source serialization includes kind and relative path', () => {
   })
 })
 
-test('multi-select validation rejects all-correct generated questions but allows single-correct multi-selects', () => {
+test('multi-select validation allows single-correct and all-correct generated questions', () => {
   const options = [
     { id: 'A', text: 'A' },
     { id: 'B', text: 'B' },
@@ -256,27 +260,67 @@ test('multi-select validation rejects all-correct generated questions but allows
     { id: 'D', text: 'D' },
   ]
 
-  assert.throws(
-    () => assertGeneratedChoiceAnswerDistribution({
-      questionId: 'generated-q1',
-      type: 'multiple',
-      options,
-      correctOptionIds: ['A', 'B', 'C', 'D'],
-    }),
-    /every option is correct/,
-  )
   assert.doesNotThrow(() => assertGeneratedChoiceAnswerDistribution({
-    questionId: 'generated-q2',
+    questionId: 'generated-q1',
     type: 'multiple',
     options,
     correctOptionIds: ['A'],
   }))
   assert.doesNotThrow(() => assertGeneratedChoiceAnswerDistribution({
-    questionId: 'generated-q3',
+    questionId: 'generated-q2',
     type: 'multiple',
     options,
     correctOptionIds: ['A', 'C'],
   }))
+  assert.doesNotThrow(() => assertGeneratedChoiceAnswerDistribution({
+    questionId: 'generated-q3',
+    type: 'multiple',
+    options,
+    correctOptionIds: ['A', 'B', 'C', 'D'],
+  }))
+  assert.throws(
+    () => assertGeneratedChoiceAnswerDistribution({
+      questionId: 'generated-q4',
+      type: 'multiple',
+      options,
+      correctOptionIds: [],
+    }),
+    /invalid multi-select answer count/,
+  )
+})
+
+test('multi-select set validation rejects predictable answer-count patterns', () => {
+  const repeated = Array.from({ length: 4 }, (_, index) => question({
+    id: `generated-q${index + 1}`,
+    number: String(index + 1),
+    type: 'multiple',
+    options: [
+      { id: 'A', text: 'A' },
+      { id: 'B', text: 'B' },
+      { id: 'C', text: 'C' },
+      { id: 'D', text: 'D' },
+    ],
+    answer: { correctOptionIds: ['A', 'B', 'C'], expectedText: null, source: 'inferred' },
+  }))
+
+  assert.throws(
+    () => assertGeneratedMultiSelectAnswerVariety(repeated),
+    /too predictable/,
+  )
+
+  const varied = repeated.map((item, index) => ({
+    ...item,
+    answer: {
+      ...item.answer,
+      correctOptionIds: [
+        ['A'],
+        ['A', 'B'],
+        ['A', 'B', 'C'],
+        ['A', 'B', 'C', 'D'],
+      ][index],
+    },
+  }))
+  assert.doesNotThrow(() => assertGeneratedMultiSelectAnswerVariety(varied))
 })
 
 function question(overrides = {}) {
