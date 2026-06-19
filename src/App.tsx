@@ -38,7 +38,9 @@ import {
   FileType,
   FolderOpen,
   FolderPlus,
+  MessageSquareQuote,
   NotebookText,
+  X,
 } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
 import { Link, useLoaderData, useNavigate, useParams, useSearchParams } from 'react-router'
@@ -136,6 +138,28 @@ type TutorStreamEvent =
   | { type: 'delta'; delta: string }
   | { type: 'final'; response: TutorResponse }
   | { type: 'done' }
+
+type PendingTutorTurn = {
+  requestId: string
+  kind: 'submit' | 'chat' | 'learning'
+  questionUnitId: string
+  baseMessages: TutorMessage[]
+  nextMessages: TutorMessage[]
+  usedLearningBeforeAnswer: boolean
+  startedAt: number
+}
+
+type TutorTurnSnapshot = {
+  requestId: string
+  status: 'active' | 'completed' | 'error'
+  kind: PendingTutorTurn['kind']
+  phase: string | null
+  questionUnitId: string | null
+  markdown: string
+  response: TutorResponse | null
+  error: string | null
+  updatedAt: number
+}
 
 type ContextStatus = 'idle' | 'processing' | 'ready' | 'error'
 
@@ -350,6 +374,7 @@ type ExamSession = {
   revealedCorrectOptionIdsByQuestion: Record<string, string[]>
   messages: TutorMessage[]
   tutorSessionId: string
+  pendingTutorTurn: PendingTutorTurn | null
   optionOrderSeed: string
   usedLearningBeforeAnswer: boolean
   progress: Record<string, ProgressRecord>
@@ -361,6 +386,11 @@ type MarkdownCopyPopup = {
   status: 'idle' | 'copied' | 'failed'
   x: number
   y: number
+}
+
+type PendingChatQuote = {
+  markdown: string
+  preview: string
 }
 
 type ChatComposerHandle = {
@@ -653,6 +683,7 @@ function App() {
   const shouldFollowCodexStreamRef = useRef(true)
   const isUserScrollingCodexRef = useRef(false)
   const codexScrollIntentResetRef = useRef<number | null>(null)
+  const reconciledTutorMarkdownLengthsRef = useRef<Record<string, number>>({})
   const courseContextSignatureRef = useRef<string | null>(null)
   const examGenerationStatusRef = useRef<ExamGenerationStatus>('idle')
   const activeTopic = topics.find((topic) => topic.id === selectedTopicId) ?? null
@@ -668,6 +699,7 @@ function App() {
     activeSession?.revealedCorrectOptionIdsByQuestion ?? emptyRevealedCorrectOptionIdsByQuestion
   const messages = activeSession?.messages ?? emptyTutorMessages
   const tutorSessionId = activeSession?.tutorSessionId ?? ''
+  const pendingTutorTurn = activeSession?.pendingTutorTurn ?? null
   const optionOrderSeed = activeSession?.optionOrderSeed ?? ''
   const usedLearningBeforeAnswer = activeSession?.usedLearningBeforeAnswer ?? false
 
@@ -720,6 +752,9 @@ function App() {
   }, [updateActiveSessionField])
   const setTutorSessionId = useCallback((value: SetStateAction<string>) => {
     updateActiveSessionField('tutorSessionId', value)
+  }, [updateActiveSessionField])
+  const setPendingTutorTurn = useCallback((value: SetStateAction<PendingTutorTurn | null>) => {
+    updateActiveSessionField('pendingTutorTurn', value)
   }, [updateActiveSessionField])
   const setOptionOrderSeed = useCallback((value: SetStateAction<string>) => {
     updateActiveSessionField('optionOrderSeed', value)
@@ -1105,6 +1140,7 @@ function App() {
     clearStreamingTutorMessage()
     setStreamingMessageKind(null)
     setTutorSessionId(crypto.randomUUID())
+    setPendingTutorTurn(null)
     setOptionOrderSeed(crypto.randomUUID())
     setUsedLearningBeforeAnswer(false)
     setError(null)
@@ -1116,6 +1152,7 @@ function App() {
     setRevealedCorrectOptionIdsByQuestion,
     setMessages,
     setOptionOrderSeed,
+    setPendingTutorTurn,
     setResult,
     setTutorSessionId,
     setUsedLearningBeforeAnswer,
@@ -1212,6 +1249,120 @@ function App() {
     })
   }, [allSets, selectedSetId, setExamSessions])
 
+  const applyCompletedTutorTurn = useCallback((turn: PendingTutorTurn, tutorResponse: TutorResponse) => {
+    const unit = units.find((candidate) => candidate.id === turn.questionUnitId)
+    if (!unit) return false
+
+    if (turn.kind === 'submit') {
+      const responseCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(unit, tutorResponse)
+      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
+        revealedCorrectOptionIdsByQuestion,
+        responseCorrectOptionIdsByQuestion,
+      )
+      if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
+        setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
+      }
+      const recordedResponse = turn.usedLearningBeforeAnswer
+        ? forceLearningAttemptRetry(tutorResponse)
+        : tutorResponse
+      setResult(recordedResponse)
+      setIsAnswerKeyRevealed(true)
+      setMessages([
+        ...turn.baseMessages,
+        { role: 'tutor', content: recordedResponse.explanation, kind: 'grading' },
+      ])
+      recordAnswer(unit, recordedResponse)
+    } else if (turn.kind === 'learning') {
+      setUsedLearningBeforeAnswer(true)
+      setMessages([
+        ...turn.baseMessages,
+        { role: 'tutor', content: tutorResponse.explanation, kind: 'learning' },
+      ])
+    } else {
+      setMessages([...turn.nextMessages, { role: 'tutor', content: tutorResponse.explanation }])
+    }
+
+    setPendingTutorTurn((current) => current?.requestId === turn.requestId ? null : current)
+    return true
+  }, [
+    recordAnswer,
+    revealedCorrectOptionIdsByQuestion,
+    setIsAnswerKeyRevealed,
+    setMessages,
+    setPendingTutorTurn,
+    setResult,
+    setRevealedCorrectOptionIdsByQuestion,
+    setUsedLearningBeforeAnswer,
+    units,
+  ])
+
+  useEffect(() => {
+    if (!pendingTutorTurn || !selectedTopicId || !tutorSessionId) return
+
+    let ignore = false
+    const poll = async () => {
+      const response = await fetch(
+        `/api/topics/${encodeURIComponent(selectedTopicId)}/tutor-turns/${encodeURIComponent(tutorSessionId)}/latest`,
+      )
+      if (response.status === 404) return
+      if (!response.ok) throw new Error(await response.text())
+
+      const snapshot = await response.json() as TutorTurnSnapshot
+      if (ignore || snapshot.requestId !== pendingTutorTurn.requestId) return
+
+      if (snapshot.status === 'completed' && snapshot.response) {
+        if (applyCompletedTutorTurn(pendingTutorTurn, snapshot.response)) {
+          setIsGrading(false)
+          setIsSubmittingAnswer(false)
+          setCodexStatus('')
+          clearStreamingTutorMessage()
+          setStreamingMessageKind(null)
+        }
+        return
+      }
+
+      if (snapshot.status === 'error') {
+        setPendingTutorTurn((current) => current?.requestId === pendingTutorTurn.requestId ? null : current)
+        throw new Error(snapshot.error || 'Codex tutor turn failed.')
+      }
+
+      setIsGrading(true)
+      setIsSubmittingAnswer(pendingTutorTurn.kind === 'submit')
+      setCodexStatus('Codex is thinking...')
+      setStreamingMessageKind(
+        pendingTutorTurn.kind === 'submit'
+          ? 'grading-pending'
+          : pendingTutorTurn.kind === 'learning'
+            ? 'learning-pending'
+            : 'pending',
+      )
+      const previousLength = reconciledTutorMarkdownLengthsRef.current[snapshot.requestId] ?? 0
+      if (snapshot.markdown.length > previousLength) {
+        appendStreamingTutorMessage(snapshot.markdown.slice(previousLength))
+        reconciledTutorMarkdownLengthsRef.current[snapshot.requestId] = snapshot.markdown.length
+      }
+    }
+
+    poll().catch((pollError) => setError(String(pollError)))
+    const interval = window.setInterval(() => {
+      poll().catch((pollError) => setError(String(pollError)))
+    }, 1200)
+
+    return () => {
+      ignore = true
+      window.clearInterval(interval)
+    }
+  }, [
+    appendStreamingTutorMessage,
+    applyCompletedTutorTurn,
+    clearStreamingTutorMessage,
+    pendingTutorTurn,
+    selectedTopicId,
+    setPendingTutorTurn,
+    setStreamingMessageKind,
+    tutorSessionId,
+  ])
+
   const submitAnswer = useCallback(async () => {
     if (!currentUnit || isGrading) return
     if (!isUnitAnswered(currentUnit, answersByQuestion)) return
@@ -1224,13 +1375,25 @@ function App() {
     setStreamingMessageKind('grading-pending')
     setError(null)
     const previousMessages = persistedTutorMessages(messages)
+    const pendingTurn: PendingTutorTurn = {
+      requestId: crypto.randomUUID(),
+      kind: 'submit',
+      questionUnitId: currentUnit.id,
+      baseMessages: previousMessages,
+      nextMessages: previousMessages,
+      usedLearningBeforeAnswer,
+      startedAt: Date.now(),
+    }
+    setPendingTutorTurn(pendingTurn)
     try {
       const tutorQuestion = buildTutorQuestion(currentUnit)
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
+          requestId: pendingTurn.requestId,
           topicId: selectedTopicId,
           sessionId: tutorSessionId,
+          turnKind: pendingTurn.kind,
           mode: 'submit',
           question: tutorQuestion,
           answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
@@ -1241,27 +1404,7 @@ function App() {
           onDelta: appendStreamingTutorMessage,
         },
       )
-      const responseCorrectOptionIdsByQuestion = getResponseCorrectOptionIdsByQuestion(
-        currentUnit,
-        tutorResponse,
-      )
-      const nextRevealedCorrectOptionIds = buildRevealedCorrectOptionIds(
-        revealedCorrectOptionIdsByQuestion,
-        responseCorrectOptionIdsByQuestion,
-      )
-      if (nextRevealedCorrectOptionIds !== revealedCorrectOptionIdsByQuestion) {
-        setRevealedCorrectOptionIdsByQuestion(nextRevealedCorrectOptionIds)
-      }
-      const recordedResponse = usedLearningBeforeAnswer
-        ? forceLearningAttemptRetry(tutorResponse)
-        : tutorResponse
-      setResult(recordedResponse)
-      setIsAnswerKeyRevealed(true)
-      setMessages([
-        ...previousMessages,
-        { role: 'tutor', content: recordedResponse.explanation, kind: 'grading' },
-      ])
-      recordAnswer(currentUnit, recordedResponse)
+      applyCompletedTutorTurn(pendingTurn, tutorResponse)
     } catch (submitError) {
       setMessages(previousMessages)
       setError(String(submitError))
@@ -1274,21 +1417,18 @@ function App() {
     }
   }, [
     appendStreamingTutorMessage,
+    applyCompletedTutorTurn,
     answersByQuestion,
     clearStreamingTutorMessage,
     currentUnit,
     followCodexStream,
     isGrading,
     messages,
-    recordAnswer,
-    setIsAnswerKeyRevealed,
     setMessages,
-    setRevealedCorrectOptionIdsByQuestion,
-    setResult,
+    setPendingTutorTurn,
     setStreamingMessageKind,
     selectedTopicId,
     tutorSessionId,
-    revealedCorrectOptionIdsByQuestion,
     usedLearningBeforeAnswer,
   ])
 
@@ -1308,12 +1448,24 @@ function App() {
       'Leave me with desirable difficulty so I still have to reason and submit an answer myself.',
     ].join(' ')
     const previousMessages = persistedTutorMessages(messages)
+    const pendingTurn: PendingTutorTurn = {
+      requestId: crypto.randomUUID(),
+      kind: 'learning',
+      questionUnitId: currentUnit.id,
+      baseMessages: previousMessages,
+      nextMessages: previousMessages,
+      usedLearningBeforeAnswer,
+      startedAt: Date.now(),
+    }
+    setPendingTutorTurn(pendingTurn)
     try {
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
+          requestId: pendingTurn.requestId,
           topicId: selectedTopicId,
           sessionId: tutorSessionId,
+          turnKind: pendingTurn.kind,
           mode: 'chat',
           phase: 'pre_submit',
           request: learningPrompt,
@@ -1326,11 +1478,7 @@ function App() {
           onDelta: appendStreamingTutorMessage,
         },
       )
-      setUsedLearningBeforeAnswer(true)
-      setMessages([
-        ...previousMessages,
-        { role: 'tutor', content: tutorResponse.explanation, kind: 'learning' },
-      ])
+      applyCompletedTutorTurn(pendingTurn, tutorResponse)
     } catch (learnError) {
       setMessages(previousMessages)
       setError(String(learnError))
@@ -1342,6 +1490,7 @@ function App() {
     }
   }, [
     appendStreamingTutorMessage,
+    applyCompletedTutorTurn,
     answersByQuestion,
     clearStreamingTutorMessage,
     currentUnit,
@@ -1349,10 +1498,11 @@ function App() {
     isGrading,
     messages,
     setMessages,
+    setPendingTutorTurn,
     setStreamingMessageKind,
-    setUsedLearningBeforeAnswer,
     selectedTopicId,
     tutorSessionId,
+    usedLearningBeforeAnswer,
   ])
 
   useEffect(() => {
@@ -1401,12 +1551,24 @@ function App() {
     setCodexStatus('Asking Codex...')
     clearStreamingTutorMessage()
     setStreamingMessageKind('pending')
+    const pendingTurn: PendingTutorTurn = {
+      requestId: crypto.randomUUID(),
+      kind: 'chat',
+      questionUnitId: currentUnit.id,
+      baseMessages: persistedTutorMessages(messages),
+      nextMessages,
+      usedLearningBeforeAnswer,
+      startedAt: Date.now(),
+    }
+    setPendingTutorTurn(pendingTurn)
     try {
       const tutorResponse = await postTutorStream(
         '/api/explain',
         {
+          requestId: pendingTurn.requestId,
           topicId: selectedTopicId,
           sessionId: tutorSessionId,
+          turnKind: pendingTurn.kind,
           mode: 'chat',
           phase: result ? 'post_submit' : 'pre_submit',
           question: buildTutorQuestion(currentUnit),
@@ -1418,7 +1580,7 @@ function App() {
           onDelta: appendStreamingTutorMessage,
         },
       )
-      setMessages([...nextMessages, { role: 'tutor', content: tutorResponse.explanation }])
+      applyCompletedTutorTurn(pendingTurn, tutorResponse)
     } catch (chatError) {
       setMessages(nextMessages)
       setError(String(chatError))
@@ -1431,6 +1593,7 @@ function App() {
   }, [
     answersByQuestion,
     appendStreamingTutorMessage,
+    applyCompletedTutorTurn,
     clearStreamingTutorMessage,
     currentUnit,
     followCodexStream,
@@ -1438,9 +1601,11 @@ function App() {
     messages,
     result,
     setMessages,
+    setPendingTutorTurn,
     setStreamingMessageKind,
     selectedTopicId,
     tutorSessionId,
+    usedLearningBeforeAnswer,
   ])
 
   const uploadTopicSourceFiles = useCallback(async (files: FileList | SourceUploadInput[], sourceKind: SourceUploadKind = 'auto') => {
@@ -1929,6 +2094,8 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
   streamingTutorMessage,
 }, ref) {
   const [markdownCopy, setMarkdownCopy] = useState<MarkdownCopyPopup | null>(null)
+  const [pendingQuote, setPendingQuote] = useState<PendingChatQuote | null>(null)
+  const composerRef = useRef<ChatComposerHandle>(null)
   const pendingMessage: TutorMessage | null = isGrading
     ? {
         role: 'tutor',
@@ -1939,6 +2106,16 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
   const hideMarkdownCopy = useCallback(() => {
     setMarkdownCopy(null)
   }, [])
+
+  useImperativeHandle(ref, () => ({
+    focus() {
+      composerRef.current?.focus()
+    },
+  }), [])
+
+  useEffect(() => {
+    setPendingQuote(null)
+  }, [resetKey])
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -1995,6 +2172,17 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
       setMarkdownCopy((current) => current ? { ...current, status: 'failed' } : current)
     }
   }, [markdownCopy])
+
+  const addSelectedMarkdownToChat = useCallback(() => {
+    if (!markdownCopy) return
+    setPendingQuote({
+      markdown: markdownCopy.markdown,
+      preview: quotePreviewText(markdownCopy.markdown),
+    })
+    window.getSelection()?.removeAllRanges()
+    hideMarkdownCopy()
+    window.requestAnimationFrame(() => composerRef.current?.focus())
+  }, [hideMarkdownCopy, markdownCopy])
 
   return (
     <aside className="codex-panel">
@@ -2059,26 +2247,31 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
       </div>
 
       {markdownCopy && (
-        <button
+        <div
           className={`markdown-copy-popup markdown-copy-${markdownCopy.status}`}
-          type="button"
           style={{ left: markdownCopy.x, top: markdownCopy.y }}
           onPointerDown={(event) => event.preventDefault()}
-          onClick={() => void copySelectedMarkdown()}
         >
-          {markdownCopy.status === 'copied'
-            ? 'Copied'
-            : markdownCopy.status === 'failed'
-              ? 'Copy failed'
-              : 'Copy Markdown'}
-        </button>
+          <button type="button" onClick={() => void copySelectedMarkdown()}>
+            {markdownCopy.status === 'copied'
+              ? 'Copied'
+              : markdownCopy.status === 'failed'
+                ? 'Copy failed'
+                : 'Copy Markdown'}
+          </button>
+          <button type="button" onClick={addSelectedMarkdownToChat}>
+            Add to chat
+          </button>
+        </div>
       )}
 
       <ChatComposer
         key={resetKey}
-        ref={ref}
+        ref={composerRef}
         disabled={isGrading}
         onSend={onSendChat}
+        quote={pendingQuote}
+        onClearQuote={() => setPendingQuote(null)}
       />
 
       {isContextModalOpen && (
@@ -2421,6 +2614,20 @@ function trimMarkdownSelection(markdown: string) {
     .trim()
 }
 
+function quotePreviewText(markdown: string) {
+  const preview = compactInlineMarkdown(markdown)
+  return preview.length > 280 ? `${preview.slice(0, 277).trimEnd()}...` : preview
+}
+
+function quotedChatInput(markdown: string, input: string) {
+  const quote = trimMarkdownSelection(markdown)
+    .split('\n')
+    .map((line) => line.trim() ? `> ${line}` : '>')
+    .join('\n')
+
+  return `${quote}\n\n${input}`
+}
+
 function compactSelectedText(text: string) {
   return text.replace(/[ \t]*\n[ \t]*/g, ' ').trim()
 }
@@ -2495,7 +2702,9 @@ const GradeWidget = memo(function GradeWidget({ result }: { result: TutorRespons
 const ChatComposer = memo(forwardRef<ChatComposerHandle, {
   disabled: boolean
   onSend: (input: string) => void | Promise<void>
-}>(function ChatComposer({ disabled, onSend }, ref) {
+  quote: PendingChatQuote | null
+  onClearQuote: () => void
+}>(function ChatComposer({ disabled, onSend, quote, onClearQuote }, ref) {
   const [chatInput, setChatInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -2515,11 +2724,35 @@ const ChatComposer = memo(forwardRef<ChatComposerHandle, {
     const trimmedInput = chatInput.trim()
     if (!trimmedInput || disabled) return
     setChatInput('')
-    void onSend(trimmedInput)
-  }, [chatInput, disabled, onSend])
+    if (quote) onClearQuote()
+    void onSend(quote ? quotedChatInput(quote.markdown, trimmedInput) : trimmedInput)
+  }, [chatInput, disabled, onClearQuote, onSend, quote])
 
   return (
     <div className="codex-compose">
+      {quote && (
+        <div className="chat-quote-chip-wrap">
+          <div
+            className="chat-quote-chip"
+            tabIndex={0}
+            title={quote.preview}
+          >
+            <MessageSquareQuote aria-hidden="true" size={16} strokeWidth={2} />
+            <span>1 selection</span>
+            <div className="chat-quote-preview" role="tooltip">
+              {quote.preview}
+            </div>
+          </div>
+          <button
+            className="chat-quote-clear"
+            type="button"
+            aria-label="Remove selected quote"
+            onClick={onClearQuote}
+          >
+            <X aria-hidden="true" size={15} strokeWidth={2.3} />
+          </button>
+        </div>
+      )}
       <form
         className="chat-row"
         onSubmit={(event) => {
@@ -3974,6 +4207,7 @@ function createExamSession(deck: { currentId: string | null; queue: string[] }):
     revealedCorrectOptionIdsByQuestion: {},
     messages: [],
     tutorSessionId: crypto.randomUUID(),
+    pendingTutorTurn: null,
     optionOrderSeed: crypto.randomUUID(),
     usedLearningBeforeAnswer: false,
     progress: {},
@@ -3994,6 +4228,7 @@ function resetExamSessionQuestionState(
     revealedCorrectOptionIdsByQuestion: {},
     messages: [],
     tutorSessionId: crypto.randomUUID(),
+    pendingTutorTurn: null,
     optionOrderSeed: crypto.randomUUID(),
     usedLearningBeforeAnswer: false,
   }
