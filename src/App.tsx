@@ -2486,8 +2486,8 @@ const ChatMessage = memo(function ChatMessage({
 const GradeWidget = memo(function GradeWidget({ result }: { result: TutorResponse }) {
   return (
     <div className={`grade-widget ${result.isCorrect ? 'correct' : 'wrong'}`}>
-      {result.verdict && <div className="grade-widget-verdict">{result.verdict}</div>}
       <div className="grade-widget-score">{Math.round(result.score * 100)}%</div>
+      {result.verdict && <div className="grade-widget-verdict">{result.verdict}</div>}
     </div>
   )
 })
