@@ -134,10 +134,11 @@ type TutorResponse = {
 }
 
 type TutorStreamEvent =
-  | { type: 'status'; message: string }
-  | { type: 'delta'; delta: string }
-  | { type: 'final'; response: TutorResponse }
-  | { type: 'done' }
+  | { seq: number; type: 'status'; message: string }
+  | { seq: number; type: 'delta'; delta: string }
+  | { seq: number; type: 'final'; response: TutorResponse }
+  | { seq: number; type: 'error'; error: string }
+  | { seq: number; type: 'done' }
 
 type PendingTutorTurn = {
   requestId: string
@@ -147,18 +148,6 @@ type PendingTutorTurn = {
   nextMessages: TutorMessage[]
   usedLearningBeforeAnswer: boolean
   startedAt: number
-}
-
-type TutorTurnSnapshot = {
-  requestId: string
-  status: 'active' | 'completed' | 'error'
-  kind: PendingTutorTurn['kind']
-  phase: string | null
-  questionUnitId: string | null
-  markdown: string
-  response: TutorResponse | null
-  error: string | null
-  updatedAt: number
 }
 
 type ContextStatus = 'idle' | 'processing' | 'ready' | 'error'
@@ -659,7 +648,6 @@ function App() {
   const [topicSources, setTopicSources] = useState<TopicSource[]>(loaderData.topicState?.sources ?? [])
   const [hasRunLocalStorageMigration, setHasRunLocalStorageMigration] = useState(false)
   const [isGrading, setIsGrading] = useState(false)
-  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false)
   const [codexStatus, setCodexStatus] = useState('')
   const [codexSidebarWidth, setCodexSidebarWidth] = useLocalState(
     codexSidebarWidthKey,
@@ -683,7 +671,7 @@ function App() {
   const shouldFollowCodexStreamRef = useRef(true)
   const isUserScrollingCodexRef = useRef(false)
   const codexScrollIntentResetRef = useRef<number | null>(null)
-  const reconciledTutorMarkdownLengthsRef = useRef<Record<string, number>>({})
+  const lastTutorEventSeqRef = useRef<Record<string, number>>({})
   const courseContextSignatureRef = useRef<string | null>(null)
   const examGenerationStatusRef = useRef<ExamGenerationStatus>('idle')
   const activeTopic = topics.find((topic) => topic.id === selectedTopicId) ?? null
@@ -871,7 +859,6 @@ function App() {
         replace: true,
       })
     }
-    setIsSubmittingAnswer(false)
     setCodexStatus('')
     clearStreamingTutorMessage()
     setStreamingMessageKind(null)
@@ -1039,7 +1026,6 @@ function App() {
         [selectedSetId]: createExamSession(buildInitialQuestionDeck(nextUnits)),
       }
     })
-    setIsSubmittingAnswer(false)
     setCodexStatus('')
     clearStreamingTutorMessage()
     setStreamingMessageKind(null)
@@ -1135,7 +1121,6 @@ function App() {
     setIsAnswerKeyRevealed(false)
     setRevealedCorrectOptionIdsByQuestion({})
     setMessages([])
-    setIsSubmittingAnswer(false)
     setCodexStatus('')
     clearStreamingTutorMessage()
     setStreamingMessageKind(null)
@@ -1300,35 +1285,9 @@ function App() {
     if (!pendingTutorTurn || !selectedTopicId || !tutorSessionId) return
 
     let ignore = false
-    const poll = async () => {
-      const response = await fetch(
-        `/api/topics/${encodeURIComponent(selectedTopicId)}/tutor-turns/${encodeURIComponent(tutorSessionId)}/latest`,
-      )
-      if (response.status === 404) return
-      if (!response.ok) throw new Error(await response.text())
-
-      const snapshot = await response.json() as TutorTurnSnapshot
-      if (ignore || snapshot.requestId !== pendingTutorTurn.requestId) return
-
-      if (snapshot.status === 'completed' && snapshot.response) {
-        if (applyCompletedTutorTurn(pendingTutorTurn, snapshot.response)) {
-          setIsGrading(false)
-          setIsSubmittingAnswer(false)
-          setCodexStatus('')
-          clearStreamingTutorMessage()
-          setStreamingMessageKind(null)
-        }
-        return
-      }
-
-      if (snapshot.status === 'error') {
-        setPendingTutorTurn((current) => current?.requestId === pendingTutorTurn.requestId ? null : current)
-        throw new Error(snapshot.error || 'Codex tutor turn failed.')
-      }
-
+    const controller = new AbortController()
+    const streamEvents = async () => {
       setIsGrading(true)
-      setIsSubmittingAnswer(pendingTutorTurn.kind === 'submit')
-      setCodexStatus('Codex is thinking...')
       setStreamingMessageKind(
         pendingTutorTurn.kind === 'submit'
           ? 'grading-pending'
@@ -1336,21 +1295,62 @@ function App() {
             ? 'learning-pending'
             : 'pending',
       )
-      const previousLength = reconciledTutorMarkdownLengthsRef.current[snapshot.requestId] ?? 0
-      if (snapshot.markdown.length > previousLength) {
-        appendStreamingTutorMessage(snapshot.markdown.slice(previousLength))
-        reconciledTutorMarkdownLengthsRef.current[snapshot.requestId] = snapshot.markdown.length
+      const eventStreamUrl = [
+        `/api/topics/${encodeURIComponent(selectedTopicId)}`,
+        `/tutor-turns/${encodeURIComponent(tutorSessionId)}/events`,
+        `?requestId=${encodeURIComponent(pendingTutorTurn.requestId)}`,
+        `&afterSeq=${lastTutorEventSeqRef.current[pendingTutorTurn.requestId] ?? 0}`,
+      ].join('')
+      const response = await fetchTutorEventStream(eventStreamUrl, controller.signal)
+      if (response.status === 404) {
+        setPendingTutorTurn((current) => current?.requestId === pendingTutorTurn.requestId ? null : current)
+        setIsGrading(false)
+        setCodexStatus('')
+        clearStreamingTutorMessage()
+        setStreamingMessageKind(null)
+        setError(null)
+        return
       }
+      if (!response.ok) throw new Error(await response.text())
+      if (!response.body) throw new Error('Tutor event stream did not return a body.')
+
+      await readTutorEventStream(response, (event) => {
+        if (ignore) return
+        const lastSeq = lastTutorEventSeqRef.current[pendingTutorTurn.requestId] ?? 0
+        if (event.seq <= lastSeq) return
+        lastTutorEventSeqRef.current[pendingTutorTurn.requestId] = event.seq
+
+        if (event.type === 'status') {
+          setCodexStatus(event.message)
+          return
+        }
+        if (event.type === 'delta') {
+          appendStreamingTutorMessage(event.delta)
+          return
+        }
+        if (event.type === 'final') {
+          if (applyCompletedTutorTurn(pendingTutorTurn, event.response)) {
+            setIsGrading(false)
+            setCodexStatus('')
+            clearStreamingTutorMessage()
+            setStreamingMessageKind(null)
+          }
+          return
+        }
+        if (event.type === 'error') {
+          setPendingTutorTurn((current) => current?.requestId === pendingTutorTurn.requestId ? null : current)
+          throw new Error(event.error || 'Codex tutor turn failed.')
+        }
+      })
     }
 
-    poll().catch((pollError) => setError(String(pollError)))
-    const interval = window.setInterval(() => {
-      poll().catch((pollError) => setError(String(pollError)))
-    }, 1200)
+    streamEvents().catch((streamError) => {
+      if (!ignore && !controller.signal.aborted) setError(String(streamError))
+    })
 
     return () => {
       ignore = true
-      window.clearInterval(interval)
+      controller.abort()
     }
   }, [
     appendStreamingTutorMessage,
@@ -1368,7 +1368,6 @@ function App() {
     if (!isUnitAnswered(currentUnit, answersByQuestion)) return
 
     setIsGrading(true)
-    setIsSubmittingAnswer(true)
     followCodexStream()
     setCodexStatus('Asking Codex...')
     clearStreamingTutorMessage()
@@ -1387,37 +1386,26 @@ function App() {
     setPendingTutorTurn(pendingTurn)
     try {
       const tutorQuestion = buildTutorQuestion(currentUnit)
-      const tutorResponse = await postTutorStream(
-        '/api/explain',
-        {
-          requestId: pendingTurn.requestId,
-          topicId: selectedTopicId,
-          sessionId: tutorSessionId,
-          turnKind: pendingTurn.kind,
-          mode: 'submit',
-          question: tutorQuestion,
-          answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
-          messages: previousMessages,
-        },
-        {
-          onStatus: setCodexStatus,
-          onDelta: appendStreamingTutorMessage,
-        },
-      )
-      applyCompletedTutorTurn(pendingTurn, tutorResponse)
+      await startTutorTurn('/api/explain', {
+        requestId: pendingTurn.requestId,
+        topicId: selectedTopicId,
+        sessionId: tutorSessionId,
+        turnKind: pendingTurn.kind,
+        mode: 'submit',
+        question: tutorQuestion,
+        answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
+        messages: previousMessages,
+      })
     } catch (submitError) {
       setMessages(previousMessages)
+      setPendingTutorTurn((current) => current?.requestId === pendingTurn.requestId ? null : current)
       setError(String(submitError))
-    } finally {
       setIsGrading(false)
-      setIsSubmittingAnswer(false)
       setCodexStatus('')
       clearStreamingTutorMessage()
       setStreamingMessageKind(null)
     }
   }, [
-    appendStreamingTutorMessage,
-    applyCompletedTutorTurn,
     answersByQuestion,
     clearStreamingTutorMessage,
     currentUnit,
@@ -1459,38 +1447,28 @@ function App() {
     }
     setPendingTutorTurn(pendingTurn)
     try {
-      const tutorResponse = await postTutorStream(
-        '/api/explain',
-        {
-          requestId: pendingTurn.requestId,
-          topicId: selectedTopicId,
-          sessionId: tutorSessionId,
-          turnKind: pendingTurn.kind,
-          mode: 'chat',
-          phase: 'pre_submit',
-          request: learningPrompt,
-          question: buildTutorQuestion(currentUnit),
-          answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
-          messages: previousMessages,
-        },
-        {
-          onStatus: setCodexStatus,
-          onDelta: appendStreamingTutorMessage,
-        },
-      )
-      applyCompletedTutorTurn(pendingTurn, tutorResponse)
+      await startTutorTurn('/api/explain', {
+        requestId: pendingTurn.requestId,
+        topicId: selectedTopicId,
+        sessionId: tutorSessionId,
+        turnKind: pendingTurn.kind,
+        mode: 'chat',
+        phase: 'pre_submit',
+        request: learningPrompt,
+        question: buildTutorQuestion(currentUnit),
+        answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
+        messages: previousMessages,
+      })
     } catch (learnError) {
       setMessages(previousMessages)
+      setPendingTutorTurn((current) => current?.requestId === pendingTurn.requestId ? null : current)
       setError(String(learnError))
-    } finally {
       setIsGrading(false)
       setCodexStatus('')
       clearStreamingTutorMessage()
       setStreamingMessageKind(null)
     }
   }, [
-    appendStreamingTutorMessage,
-    applyCompletedTutorTurn,
     answersByQuestion,
     clearStreamingTutorMessage,
     currentUnit,
@@ -1562,29 +1540,21 @@ function App() {
     }
     setPendingTutorTurn(pendingTurn)
     try {
-      const tutorResponse = await postTutorStream(
-        '/api/explain',
-        {
-          requestId: pendingTurn.requestId,
-          topicId: selectedTopicId,
-          sessionId: tutorSessionId,
-          turnKind: pendingTurn.kind,
-          mode: 'chat',
-          phase: result ? 'post_submit' : 'pre_submit',
-          question: buildTutorQuestion(currentUnit),
-          answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
-          messages: nextMessages,
-        },
-        {
-          onStatus: setCodexStatus,
-          onDelta: appendStreamingTutorMessage,
-        },
-      )
-      applyCompletedTutorTurn(pendingTurn, tutorResponse)
+      await startTutorTurn('/api/explain', {
+        requestId: pendingTurn.requestId,
+        topicId: selectedTopicId,
+        sessionId: tutorSessionId,
+        turnKind: pendingTurn.kind,
+        mode: 'chat',
+        phase: result ? 'post_submit' : 'pre_submit',
+        question: buildTutorQuestion(currentUnit),
+        answer: buildTutorAnswerPayload(currentUnit, answersByQuestion),
+        messages: nextMessages,
+      })
     } catch (chatError) {
       setMessages(nextMessages)
+      setPendingTutorTurn((current) => current?.requestId === pendingTurn.requestId ? null : current)
       setError(String(chatError))
-    } finally {
       setIsGrading(false)
       setCodexStatus('')
       clearStreamingTutorMessage()
@@ -1592,8 +1562,6 @@ function App() {
     }
   }, [
     answersByQuestion,
-    appendStreamingTutorMessage,
-    applyCompletedTutorTurn,
     clearStreamingTutorMessage,
     currentUnit,
     followCodexStream,
@@ -1816,7 +1784,6 @@ function App() {
         error={error}
         isAnswerKeyRevealed={isAnswerKeyRevealed}
         isGrading={isGrading}
-        isSubmittingAnswer={isSubmittingAnswer}
         last25={last25}
         onExplainConcept={explainConceptBeforeAnswering}
         onNextAfterResult={handleNextQuestionAfterResult}
@@ -1911,7 +1878,6 @@ const TrainerPanel = memo(function TrainerPanel({
   error,
   isAnswerKeyRevealed,
   isGrading,
-  isSubmittingAnswer,
   last25,
   onExplainConcept,
   onNextAfterResult,
@@ -1932,7 +1898,6 @@ const TrainerPanel = memo(function TrainerPanel({
   error: string | null
   isAnswerKeyRevealed: boolean
   isGrading: boolean
-  isSubmittingAnswer: boolean
   last25: HistoryItem[]
   onExplainConcept: () => void
   onNextAfterResult: () => void
@@ -2001,53 +1966,51 @@ const TrainerPanel = memo(function TrainerPanel({
         </article>
       </div>
 
-      {!isSubmittingAnswer && (
-        <div className="action-row">
-          {result ? (
+      <div className="action-row">
+        {result ? (
+          <button
+            className="primary-button"
+            type="button"
+            onClick={onNextAfterResult}
+            disabled={isGrading}
+            aria-keyshortcuts="Meta+Enter"
+            title="Command+Enter"
+          >
+            Next question <span className="shortcut-hint">(Cmd+Enter)</span>
+          </button>
+        ) : (
+          <>
             <button
               className="primary-button"
               type="button"
-              onClick={onNextAfterResult}
-              disabled={isGrading}
+              onClick={onSubmitAnswer}
+              disabled={!canSubmitAnswer || isGrading}
               aria-keyshortcuts="Meta+Enter"
               title="Command+Enter"
             >
-              Next question
+              Submit answer <span className="shortcut-hint">(Cmd+Enter)</span>
             </button>
-          ) : (
-            <>
+            <div className="secondary-actions">
               <button
-                className="primary-button"
+                className="secondary-button"
                 type="button"
-                onClick={onSubmitAnswer}
-                disabled={!canSubmitAnswer || isGrading}
-                aria-keyshortcuts="Meta+Enter"
-                title="Command+Enter"
+                onClick={onExplainConcept}
+                disabled={isGrading}
               >
-                Submit answer
+                I don&apos;t know
               </button>
-              <div className="secondary-actions">
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={onExplainConcept}
-                  disabled={isGrading}
-                >
-                  I don&apos;t know
-                </button>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={onSkipQuestion}
-                  disabled={isGrading}
-                >
-                  Skip / next
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onSkipQuestion}
+                disabled={isGrading}
+              >
+                Skip / next
+              </button>
+            </div>
+          </>
+        )}
+      </div>
 
       {error && <div className="error-box">{error}</div>}
     </section>
@@ -2764,7 +2727,7 @@ const ChatComposer = memo(forwardRef<ChatComposerHandle, {
           ref={textareaRef}
           value={chatInput}
           onChange={(event) => setChatInput(event.target.value)}
-          placeholder="Ask Codex about this question..."
+          placeholder="Ask Codex about this question... (Shift+Escape)"
           disabled={disabled}
           rows={1}
           onKeyDown={(event) => {
@@ -2848,7 +2811,7 @@ const QuestionPrompt = memo(function QuestionPrompt({
           className={openAnswerTextareaClassName(openAnswerState, showAnswerKey)}
           value={answer.text ?? ''}
           onChange={(event) => onOpenAnswerChange(question.id, event.target.value)}
-          placeholder="Write a short exam-style answer..."
+          placeholder="Write a short exam-style answer... (Cmd+Enter)"
           disabled={disabled}
         />
       ) : (
@@ -4394,48 +4357,54 @@ function forceLearningAttemptRetry(response: TutorResponse): TutorResponse {
   }
 }
 
-async function postTutorStream(
-  url: string,
-  payload: unknown,
-  handlers: {
-    onStatus?: (message: string) => void
-    onDelta?: (delta: string) => void
-    onFinal?: (response: TutorResponse) => void
-  } = {},
-) {
+async function startTutorTurn(url: string, payload: unknown) {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...(payload as Record<string, unknown>), stream: false }),
   })
   if (!response.ok) throw new Error(await response.text())
+  return await response.json()
+}
 
-  if (!response.body) {
-    return (await response.json()) as TutorResponse
+async function fetchTutorEventStream(url: string, signal: AbortSignal) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await fetch(url, { signal })
+    if (response.status !== 404) return response
+    await delay(150, signal)
   }
+  return await fetch(url, { signal })
+}
 
-  const reader = response.body.getReader()
+function delay(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const timeout = window.setTimeout(resolve, ms)
+    signal.addEventListener('abort', () => {
+      window.clearTimeout(timeout)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }, { once: true })
+  })
+}
+
+async function readTutorEventStream(response: Response, onEvent: (event: TutorStreamEvent) => void) {
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('Tutor event stream did not return a body.')
+
   const decoder = new TextDecoder()
   let buffer = ''
-  let finalResponse: TutorResponse | null = null
 
   while (true) {
     const { value, done } = await reader.read()
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done })
     buffer = readStreamLines(buffer, (line) => {
-      const event = JSON.parse(line) as TutorStreamEvent
-      if (event.type === 'status') handlers.onStatus?.(event.message)
-      if (event.type === 'delta') handlers.onDelta?.(event.delta)
-      if (event.type === 'final') {
-        finalResponse = event.response
-        handlers.onFinal?.(event.response)
-      }
+      onEvent(JSON.parse(line) as TutorStreamEvent)
     })
     if (done) break
   }
-
-  if (!finalResponse) throw new Error('Codex stream ended without a tutor response.')
-  return finalResponse
 }
 
 async function jsonResponse<T>(response: Response): Promise<T> {

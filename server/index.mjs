@@ -496,7 +496,18 @@ app.get('/api/file', (req, res) => {
 })
 
 app.post('/api/explain', (req, res) => {
-  streamTutorTurn(req.body ?? {}, res).catch((error) => {
+  if (req.body?.stream === false) {
+    startTutorTurn(req.body ?? {})
+      .then((turn) => res.status(202).json(publicTutorTurn(turn)))
+      .catch((error) => {
+        res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+      })
+    return
+  }
+
+  startTutorTurn(req.body ?? {})
+    .then((turn) => streamTutorTurnEvents(turn, res))
+    .catch((error) => {
     if (!res.headersSent) {
       res.status(200).json(fallbackExplanation(req.body ?? {}, error))
       return
@@ -528,6 +539,29 @@ app.get('/api/topics/:topicId/tutor-turns/:sessionId/latest', (req, res) => {
   }
 })
 
+app.get('/api/topics/:topicId/tutor-turns/:sessionId/events', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const sessionId = String(req.params.sessionId || '')
+    const requestId = String(req.query.requestId || '')
+    const afterSeq = Number(req.query.afterSeq || 0)
+    if (!sessionId || !requestId) {
+      res.status(400).json({ error: 'Missing tutor session id or request id.' })
+      return
+    }
+
+    const turn = tutorTurns.get(tutorTurnKey(topicId, sessionId))
+    if (!turn || turn.requestId !== requestId) {
+      res.status(404).json({ error: 'No tutor turn found.' })
+      return
+    }
+
+    streamTutorTurnEvents(turn, res, Number.isFinite(afterSeq) ? afterSeq : 0)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
 app.listen(port, () => {
   codex = new CodexAppServer()
   const cleanupInterval = setInterval(cleanupExpiredTutorThreads, tutorThreadCleanupIntervalMs)
@@ -535,23 +569,17 @@ app.listen(port, () => {
   console.log(`TurboLearner Codex bridge listening on http://localhost:${port}`)
 })
 
-async function streamTutorTurn(payload, res) {
-  res.set({
-    'Content-Type': 'application/x-ndjson; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  })
-  res.flushHeaders?.()
-
+async function startTutorTurn(payload) {
   const topicId = safeTopicId(payload.topicId) ?? defaultTopicId
   const sessionId = String(payload.sessionId || payload.question?.id || 'default')
   const tutorThreadKey = `${topicId}:${sessionId}`
   const turnKey = tutorTurnKey(topicId, sessionId)
   const requestId = String(payload.requestId || randomUUID())
+  const existingTurn = tutorTurns.get(turnKey)
+  if (existingTurn?.requestId === requestId) return existingTurn
+
   const isFollowUp = payload.mode === 'chat'
   const isLearningRequest = payload.mode === 'learn'
-  const threadId = await getTutorThread(tutorThreadKey, topicId)
   const prompt = isLearningRequest
     ? buildLearningPrompt(payload)
     : isFollowUp
@@ -572,6 +600,10 @@ async function streamTutorTurn(payload, res) {
     markdown: '',
     response: null,
     error: null,
+    nextSeq: 1,
+    events: [],
+    subscribers: new Set(),
+    started: false,
     updatedAt: Date.now(),
   }
   tutorTurns.set(turnKey, turnState)
@@ -580,68 +612,96 @@ async function streamTutorTurn(payload, res) {
   }, (nextAnswerKey) => {
     answerKey = nextAnswerKey
   })
+  appendTutorTurnEvent(turnState, { type: 'status', message: 'Asking Codex...' })
+  turnState.started = true
+
+  void (async () => {
+    try {
+      const threadId = await getTutorThread(tutorThreadKey, topicId)
+      await codex.startTurn({
+        threadId,
+        input,
+        cwd: appRoot,
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        onNotification: (message) => {
+          if (message.method === 'turn/started') {
+            appendTutorTurnEvent(turnState, { type: 'status', message: 'Codex is thinking...' })
+            return
+          }
+
+          if (message.method === 'item/agentMessage/delta') {
+            const delta = message.params?.delta ?? ''
+            const visibleDelta = gradeFilter.push(delta)
+            if (visibleDelta) {
+              markdown += visibleDelta
+              turnState.markdown = markdown
+              appendTutorTurnEvent(turnState, { type: 'delta', delta: visibleDelta })
+            }
+            return
+          }
+
+          if (message.method === 'item/completed' && message.params?.item?.type === 'agentMessage') {
+            return
+          }
+        },
+      })
+
+      const finalDelta = gradeFilter.flush()
+      if (finalDelta) {
+        markdown += finalDelta
+        turnState.markdown = markdown
+        appendTutorTurnEvent(turnState, { type: 'delta', delta: finalDelta })
+      }
+      const response = tutorResponseFromMarkdown(payload, markdown, grade, answerKey)
+      turnState.status = 'completed'
+      turnState.response = response
+      appendTutorTurnEvent(turnState, { type: 'final', response })
+      appendTutorTurnEvent(turnState, { type: 'done' })
+      closeTutorTurnSubscribers(turnState)
+    } catch (error) {
+      turnState.status = 'error'
+      turnState.error = error instanceof Error ? error.message : String(error)
+      appendTutorTurnEvent(turnState, { type: 'error', error: turnState.error })
+      closeTutorTurnSubscribers(turnState)
+    }
+  })()
+
+  return turnState
+}
+
+function streamTutorTurnEvents(turn, res, afterSeq = 0) {
+  res.set({
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  res.flushHeaders?.()
+
   let settled = false
+  const writeTurnEvent = (event) => {
+    if (settled || res.destroyed) return
+    if (event.type === 'close') {
+      settled = true
+      res.end()
+      return
+    }
+    if (event.seq <= afterSeq) return
+    writeEvent(res, event)
+  }
 
-  writeEvent(res, { type: 'status', message: 'Asking Codex...' })
+  for (const event of turn.events) writeTurnEvent(event)
+  if (turn.status === 'completed' || turn.status === 'error') {
+    res.end()
+    return
+  }
 
+  turn.subscribers.add(writeTurnEvent)
   res.on('close', () => {
     settled = true
+    turn.subscribers.delete(writeTurnEvent)
   })
-
-  try {
-    await codex.startTurn({
-      threadId,
-      input,
-      cwd: appRoot,
-      approvalPolicy: 'never',
-      sandboxPolicy: { type: 'readOnly', networkAccess: false },
-      onNotification: (message) => {
-        if (message.method === 'turn/started') {
-          turnState.updatedAt = Date.now()
-          if (!settled) writeEvent(res, { type: 'status', message: 'Codex is thinking...' })
-          return
-        }
-
-        if (message.method === 'item/agentMessage/delta') {
-          const delta = message.params?.delta ?? ''
-          const visibleDelta = gradeFilter.push(delta)
-          if (visibleDelta) {
-            markdown += visibleDelta
-            turnState.markdown = markdown
-            turnState.updatedAt = Date.now()
-            if (!settled) writeEvent(res, { type: 'delta', delta: visibleDelta })
-          }
-          return
-        }
-
-        if (message.method === 'item/completed' && message.params?.item?.type === 'agentMessage') {
-          return
-        }
-      },
-    })
-  } catch (error) {
-    turnState.status = 'error'
-    turnState.error = error instanceof Error ? error.message : String(error)
-    turnState.updatedAt = Date.now()
-    throw error
-  }
-
-  const finalDelta = gradeFilter.flush()
-  if (finalDelta) {
-    markdown += finalDelta
-    turnState.markdown = markdown
-    turnState.updatedAt = Date.now()
-    if (!settled) writeEvent(res, { type: 'delta', delta: finalDelta })
-  }
-  const response = tutorResponseFromMarkdown(payload, markdown, grade, answerKey)
-  turnState.status = 'completed'
-  turnState.response = response
-  turnState.updatedAt = Date.now()
-  if (!settled) {
-    writeEvent(res, { type: 'final', response })
-    writeEvent(res, { type: 'done' })
-    res.end()
-  }
 }
 
 function buildCodexInput(prompt, payload) {
@@ -778,6 +838,19 @@ function tutorTurnKey(topicId, sessionId) {
   return `${topicId}:${sessionId}`
 }
 
+function appendTutorTurnEvent(turn, event) {
+  const sequencedEvent = { ...event, seq: turn.nextSeq++ }
+  turn.events.push(sequencedEvent)
+  turn.updatedAt = Date.now()
+  for (const subscriber of turn.subscribers) subscriber(sequencedEvent)
+  return sequencedEvent
+}
+
+function closeTutorTurnSubscribers(turn) {
+  for (const subscriber of turn.subscribers) subscriber({ type: 'close', seq: Number.MAX_SAFE_INTEGER })
+  turn.subscribers.clear()
+}
+
 function publicTutorTurn(turn) {
   return {
     requestId: turn.requestId,
@@ -788,6 +861,7 @@ function publicTutorTurn(turn) {
     markdown: turn.markdown,
     response: turn.response,
     error: turn.error,
+    lastSeq: turn.nextSeq - 1,
     updatedAt: turn.updatedAt,
   }
 }
@@ -1031,10 +1105,11 @@ function createGradeCallFilter(onGrade, onAnswerKey) {
       return visible
     },
     flush() {
-      const toolCall = parseHiddenToolCall(pending)
-      const visible = toolCall ? '' : pending
-      if (toolCall?.type === 'grade') onGrade(toolCall.value)
-      else if (toolCall?.type === 'answerKey') onAnswerKey(toolCall.value)
+      const { visible, toolCalls } = splitHiddenToolCalls(pending)
+      for (const toolCall of toolCalls) {
+        if (toolCall.type === 'grade') onGrade(toolCall.value)
+        else if (toolCall.type === 'answerKey') onAnswerKey(toolCall.value)
+      }
       pending = ''
       return visible
     },
@@ -1131,18 +1206,39 @@ function parseAnswerKeyToolCallJson(json) {
   }
 }
 
-function parseGradeToolCall(line) {
-  const match = line.trim().match(/^grade\((\{[\s\S]*\})\)$/i)
-  if (!match) return null
-
-  return parseGradeToolCallJson(match[1])
+function stripGradeToolCall(markdown) {
+  return splitHiddenToolCalls(markdown).visible.trim()
 }
 
-function stripGradeToolCall(markdown) {
-  return markdown
-    .replace(/(?:^|\n)\s*answerKey\(\{[\s\S]*?\}\)\s*$/i, '')
-    .replace(/(?:^|\n)\s*grade\(\{[\s\S]*?\}\)\s*$/i, '')
-    .trim()
+function splitHiddenToolCalls(markdown) {
+  const parts = markdown.split(/(\r?\n)/)
+  const lines = []
+  for (let index = 0; index < parts.length; index += 2) {
+    lines.push({
+      text: parts[index] ?? '',
+      breakText: parts[index + 1] ?? '',
+    })
+  }
+
+  const toolCalls = []
+  let end = lines.length
+  while (end > 0) {
+    const line = lines[end - 1]
+    if (!line.text.trim()) {
+      end -= 1
+      continue
+    }
+
+    const toolCall = parseHiddenToolCall(line.text)
+    if (!toolCall) break
+    toolCalls.unshift(toolCall)
+    end -= 1
+  }
+
+  return {
+    visible: lines.slice(0, end).map((line) => `${line.text}${line.breakText}`).join(''),
+    toolCalls,
+  }
 }
 
 function extractScore(markdown) {

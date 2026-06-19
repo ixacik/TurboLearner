@@ -1228,6 +1228,12 @@
   color: var(--bg);
 }
 
+.shortcut-hint {
+  font-size: 0.86em;
+  font-weight: 700;
+  opacity: 0.68;
+}
+
 .secondary-button,
 .ghost-button {
   background: var(--surface);
