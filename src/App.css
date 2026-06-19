@@ -263,13 +263,14 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-h) 18%, transparent);
 }
 
-.source-plus-icon {
+.source-add-icon {
   width: 17px;
   height: 17px;
   fill: none;
   stroke: currentColor;
   stroke-width: 2.2;
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .source-list {
@@ -320,30 +321,84 @@
   border-bottom: 0;
 }
 
-.source-pdf-icon {
+.source-kind-icon {
   width: 30px;
   height: 30px;
   flex: 0 0 auto;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-h);
 }
 
-.source-pdf-page {
-  fill: #d32f2f;
-}
-
-.source-pdf-fold {
-  fill: #ffcdd2;
-}
-
-.source-pdf-label {
-  fill: rgba(255, 255, 255, 0.18);
-}
-
-.source-pdf-icon text {
-  fill: #fff;
-  font-family: Arial, sans-serif;
-  font-size: 4.4px;
+.source-kind-extension {
+  position: absolute;
+  right: -5px;
+  bottom: -3px;
+  min-width: 16px;
+  border-radius: 4px;
+  padding: 1px 3px;
+  background: var(--bg);
+  color: currentColor;
+  font-size: 7px;
+  line-height: 1.1;
   font-weight: 900;
   letter-spacing: 0;
+  text-align: center;
+}
+
+.source-kind-pdf {
+  color: #f87171;
+}
+
+.source-kind-folder {
+  color: #38bdf8;
+}
+
+.source-kind-python {
+  color: #facc15;
+}
+
+.source-kind-javascript {
+  color: #fde047;
+}
+
+.source-kind-typescript,
+.source-kind-go {
+  color: #60a5fa;
+}
+
+.source-kind-notebook,
+.source-kind-json,
+.source-kind-yaml {
+  color: #c084fc;
+}
+
+.source-kind-markdown,
+.source-kind-text,
+.source-kind-file {
+  color: #cbd5e1;
+}
+
+.source-kind-csv,
+.source-kind-sql {
+  color: #34d399;
+}
+
+.source-kind-html,
+.source-kind-ruby,
+.source-kind-php {
+  color: #fb923c;
+}
+
+.source-kind-css,
+.source-kind-csharp,
+.source-kind-cpp,
+.source-kind-java,
+.source-kind-rust,
+.source-kind-shell,
+.source-kind-code {
+  color: #93c5fd;
 }
 
 .source-row strong {
@@ -363,6 +418,11 @@
 
 .source-row.source-error {
   color: #fca5a5;
+}
+
+.source-error-box {
+  padding: 8px 10px;
+  font-size: 12px;
 }
 
 .source-remove-button {

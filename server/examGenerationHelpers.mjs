@@ -19,9 +19,12 @@ export function buildExamDraftGenerationPrompt({
   topicId = null,
   examId,
   examAssetDir,
+  outputPath = null,
+  sourceManifest = null,
   usableFiles,
   failedFiles,
   promptContext,
+  codeExampleFiles = [],
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
   const imageUrlPrefix = imageUrlPrefixFor(topicId, examId)
@@ -34,55 +37,11 @@ Asset directory for any generated PNG/JPEG images: ${examAssetDir}
 Image URL prefix for generated images: ${imageUrlPrefix}
 
 Output contract:
-- Return exactly one JSON object for a TurboLearner question set, not a full bank.
-- Put the final JSON inside a fenced \`\`\`json block.
-- The object must have: id, title, description, sourcePath, questions.
-- Use a concise title, preferably "Generated Exam N" or "Generated ML Exam".
-- Use a very short description, maximum 8 words. Do not enumerate all topics in the description.
-- Every question must follow schema version 2 from the real exam examples.
-- Use setId "${examId}" on every question.
-- Use source "Generated Exam".
-- Use answer.source "inferred" for every generated answer.
-- For open questions, options must be [] and answer.expectedText must contain the rubric/model answer.
-- For normal single-choice MCQs, use exactly 4 options.
-- For true/false or yes/no single-choice questions, use exactly 2 options.
-- Do not force true/false questions into 4 options.
-- For multi-select questions, use 3-5 options.
-- For single/multiple questions, answer.correctOptionIds must contain canonical option ids.
-- Include correctOptionIds legacy mirror for choice questions.
-- Avoid making correct answers longer, more specific, or stylistically different than distractors.
-- Make questions non-trivial, course-grounded, and hard to guess.
-- Include grouped questions where the real exam style supports them.
-- Include code examples and image-based questions where course material supports them.
+- Write exactly one TurboLearner question set JSON object, not a full bank.
+- Save the JSON file here: ${outputPath || 'return the JSON in your final response'}.
+- If an output path is provided, create or overwrite that file yourself and keep your final chat response brief.
 
-Image requirements:
-- Do not output SVG.
-- If a question needs a diagram/chart/graph, use the built-in imagegen skill / image_gen tool to create a polished raster PNG/JPEG.
-- Do not use Matplotlib for generated exam images unless imagegen is unavailable and the question would otherwise have to be dropped.
-- After imagegen creates an image under $CODEX_HOME/generated_images, copy the selected output into the asset directory.
-- Use local shell commands only to create directories, copy imagegen output, inspect files, and verify that referenced PNG/JPEG assets exist.
-- Reference images in prompts as <image>${imageUrlPrefix}filename.png</image>.
-- Include the same URL in imagePaths.
-- Filenames must not reveal the answer.
-- For grouped questions, put a visual in groupPrompt when it applies to the whole group; do not repeat that same <image> in child prompts.
-- Only put an image in a child prompt when it is specific to that subquestion and not already shown in the groupPrompt.
-
-Priority order:
-1. Cover selected lecture material that is unseen or underrepresented in the coverage profile.
-2. Count both real exams and generated exams as already-covered practice when choosing topics and angles.
-3. Use only real exams for vibe: phrasing, grouping, point values, difficulty, type mix, and answer style.
-4. Do not imitate generated exams' style, phrasing, structure, option patterns, or question construction.
-5. Do not create pure spinoffs of existing questions. If an important concept repeats, test a genuinely different lecture angle.
-
-Quality requirements:
-- Match the real exams' style, phrasing, grouping, point values, and difficulty.
-- Infer exam length and type mix from real style examples only.
-- Cover the selected lecture material broadly without adding topics not evidenced by lectures.
-- Repeating important concepts is allowed only when the angle is fresh and useful for spaced practice.
-- Do not clone the same surface scenario, code bug, diagram concept, numeric setup, or option pattern from any existing question.
-- Code questions should vary the implementation mistakes they test; do not repeatedly use the same precision/recall/F1 bug unless the lecture material makes that repetition necessary.
-- Before finalizing each question, check whether it is testing a new angle or merely rewording an existing example; replace it if it is merely a rewording.
-- Include math/code tags using TurboLearner syntax when useful.
+${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
 Extraction notes:
 ${extractionNotes}
@@ -93,8 +52,8 @@ ${JSON.stringify(promptContext.styleExamples, null, 2)}
 Coverage history from all prior exams:
 ${JSON.stringify(promptContext.coverageProfile, null, 2)}
 
-Selected lecture text:
-${lectureTextBlock(usableFiles)}
+Course source manifest:
+${sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles })}
 `.trim()
 }
 
@@ -102,9 +61,13 @@ export function buildExamReviewPrompt({
   topicId = null,
   examId,
   examAssetDir,
+  outputPath = null,
+  draftPath = null,
+  sourceManifest = null,
   usableFiles,
   failedFiles,
   promptContext,
+  codeExampleFiles = [],
   draftSet,
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
@@ -120,33 +83,35 @@ Image URL prefix for generated images: ${imageUrlPrefix}
 You are the second-pass exam editor. The first pass generated a draft. Your job is to fix it, not to comment on it.
 
 Output contract:
-- Return exactly one JSON object for the final TurboLearner question set, not review notes.
-- Put the final JSON inside a fenced \`\`\`json block.
+- Write exactly one final TurboLearner question set JSON object, not review notes.
+- Save the corrected JSON file here: ${outputPath || 'return the JSON in your final response'}.
+- If an output path is provided, create or overwrite that file yourself and keep your final chat response brief.
 - Preserve id "${examId}" for the set and setId "${examId}" on every question.
-- Use source "Generated Exam" and answer.source "inferred".
 - Preserve valid generated image references when the question remains valid.
 - If you introduce a new image question, generate/copy a PNG/JPEG into the asset directory and reference it as <image>${imageUrlPrefix}filename.png</image>.
-- Do not output SVG.
-- For grouped questions, keep shared visuals only in groupPrompt and remove duplicate child-level <image> tags.
-- Use child-level images only when that visual is specific to one subquestion and not already shown in groupPrompt.
-- Final JSON must pass the same schema rules as the draft generation prompt.
+- Final JSON must pass every shared guideline below.
+
+${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
 Review rubric:
 - Replace or rewrite questions that are near-duplicates of any prior real or generated question.
 - Remove pure spinoffs that keep the same scenario, wording, code bug, diagram setup, numeric setup, or option pattern.
+- Fix multi-select questions where all options are correct or no options are correct.
+- Replace questions that ask what happened in the lecture, what was shown in the lecture, or what matches a lecture derivation/example.
+- Reject lecture-memorization trivia: slide-specific examples, exact classroom walkthroughs, toy numbers, professor phrasing, or derivation steps unless real exams clearly test that exact math depth.
 - Fix obvious answers, weak distractors, answer-length tells, malformed rubrics, shallow prompts, unsupported lecture claims, and inconsistent answer keys.
-- Substitute new questions from the selected lecture material when a question is too duplicated or too low quality.
+- Substitute new questions from the selected source material when a question is too duplicated or too low quality.
 - Keep the same real-exam vibe: difficulty, phrasing, grouping, point values, type mix, and answer style.
 - Generated prior exams are coverage history only. Do not copy their style or structure.
-- Prefer unseen and underrepresented lecture material after accounting for all prior exams.
-- Do not add topics that are not evidenced by the selected lecture text.
+- Prefer unseen and underrepresented source material after accounting for all prior exams.
+- Do not add topics that are not evidenced by the provided course sources.
 - Preserve grouping and type mix when possible, but quality and non-duplication are higher priority.
 
 Extraction notes:
 ${extractionNotes}
 
 Draft exam JSON:
-${JSON.stringify(draftSet, null, 2)}
+${draftPath ? `Read the draft JSON from: ${draftPath}` : JSON.stringify(draftSet, null, 2)}
 
 Real exam style examples:
 ${JSON.stringify(promptContext.styleExamples, null, 2)}
@@ -154,9 +119,89 @@ ${JSON.stringify(promptContext.styleExamples, null, 2)}
 Coverage history from all prior exams:
 ${JSON.stringify(promptContext.coverageProfile, null, 2)}
 
-Selected lecture text:
-${lectureTextBlock(usableFiles)}
+Course source manifest:
+${sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles })}
 `.trim()
+}
+
+function sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix }) {
+  return `
+Shared question-set guidelines:
+- The object must have: id, title, description, sourcePath, questions.
+- Use a concise title, preferably "Generated Exam N" or "Generated ML Exam".
+- Use a very short description, maximum 8 words. Do not enumerate all topics in the description.
+- Every question must follow schema version 2 from the real exam examples.
+- Use setId "${examId}" on every question.
+- Use source "Generated Exam".
+- Use answer.source "inferred" for every generated answer.
+- For open questions, options must be [] and answer.expectedText must contain the rubric/model answer.
+- For normal single-choice MCQs, use exactly 4 options.
+- For true/false or yes/no single-choice questions, use exactly 2 options.
+- Do not force true/false questions into 4 options.
+- For multi-select questions, use 3-5 options.
+- Multi-select questions must have at least one correct option and at least one incorrect option.
+- Never make every multi-select option correct; if every statement is true, rewrite one or more distractors so they are plausibly false.
+- If only one option is correct, consider making it a single-choice question, but this is not required when the question wording reasonably allows multiple answers.
+- For single/multiple questions, answer.correctOptionIds must contain canonical option ids.
+- Include correctOptionIds legacy mirror for choice questions.
+- Avoid making correct answers longer, more specific, or stylistically different than distractors.
+- Make questions non-trivial, course-grounded, and hard to guess.
+- Include grouped questions where the real exam style supports them.
+- Include code examples and image-based questions where course material supports them.
+
+Shared course-code requirements:
+- Treat uploaded source text as the primary authority for concepts and coverage.
+- Use uploaded course code examples only to match programming languages, APIs, style, difficulty, implementation mistakes, and assignment scope.
+- Prefer adapting code-question patterns from uploaded code examples when possible.
+- Do not invent unrelated programming domains, libraries, APIs, or tasks that are absent from uploaded source text and uploaded code examples.
+- Do not copy full assignment solutions verbatim; write fresh exam questions using the same scope and idioms.
+- If no code examples are provided, avoid forced code questions unless the source text clearly supports code-level assessment.
+
+Shared image requirements:
+- Do not output SVG.
+- If a question needs a diagram/chart/graph, use the built-in imagegen skill / image_gen tool to create a polished raster PNG/JPEG.
+- Do not use Matplotlib for generated exam images unless imagegen is unavailable and the question would otherwise have to be dropped.
+- After imagegen creates an image under $CODEX_HOME/generated_images, copy the selected output into the asset directory.
+- Use local shell commands only to create directories, copy imagegen output, inspect files, and verify that referenced PNG/JPEG assets exist.
+- Reference images in prompts as <image>${imageUrlPrefix}filename.png</image>.
+- Include the same URL in imagePaths.
+- Filenames must not reveal the answer.
+- For grouped questions, put a visual in groupPrompt when it applies to the whole group; do not repeat that same <image> in child prompts, and remove duplicate child-level <image> tags.
+- Only put an image in a child prompt when it is specific to that subquestion and not already shown in the groupPrompt.
+
+Shared priority order:
+1. Cover selected source material that is unseen or underrepresented in the coverage profile.
+2. Count both real exams and generated exams as already-covered practice when choosing topics and angles.
+3. Use only real exams for vibe: phrasing, grouping, point values, difficulty, type mix, and answer style.
+4. Do not imitate generated exams' style, phrasing, structure, option patterns, or question construction.
+5. Do not create pure spinoffs of existing questions. If an important concept repeats, test a genuinely different lecture angle.
+
+Shared concept-understanding requirements:
+- Test broad concept understanding, model behavior, tradeoffs, recognition, interpretation, and application.
+- Do not ask what happened in the lecture, what was shown in the lecture, or which mapping/derivation/example "matches the lecture derivation".
+- Do not require memorizing lecture-specific examples, slide-specific derivation steps, classroom walkthroughs, toy numbers, or professor phrasing.
+- Source text is evidence for course scope and depth, not source material for trivia about the source itself.
+- Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level of mathematical specificity.
+- Prefer asking what a concept means or how it applies over asking the learner to reproduce an exact lecture artifact.
+
+Shared quality requirements:
+- Match the real exams' style, phrasing, grouping, point values, and difficulty.
+- Infer exam length and type mix from real style examples only.
+- Cover the selected source material broadly without adding topics not evidenced by sources.
+- Repeating important concepts is allowed only when the angle is fresh and useful for spaced practice.
+- Do not clone the same surface scenario, code bug, diagram concept, numeric setup, or option pattern from any existing question.
+- Code questions should vary the implementation mistakes they test; do not repeatedly use the same precision/recall/F1 bug unless the source material makes that repetition necessary.
+- Before finalizing each question, check whether it is testing a new angle or merely rewording an existing example; replace it if it is merely a rewording.
+- Include math/code tags using TurboLearner syntax when useful.
+`.trim()
+}
+
+export function assertGeneratedChoiceAnswerDistribution({ questionId, type, options, correctOptionIds }) {
+  if (type !== 'multiple') return
+
+  if (correctOptionIds.length >= options.length) {
+    throw new Error(`${questionId} is multi-select but every option is correct; include at least one plausible incorrect option.`)
+  }
 }
 
 function styleExampleSet(set) {
@@ -233,6 +278,7 @@ function coverageAngle(set, question) {
     type: question?.type,
     concepts: Array.isArray(question?.concepts) ? question.concepts : [],
     hasCode: /<code\b/i.test(`${question?.prompt ?? ''}\n${question?.groupPrompt ?? ''}`),
+    codeSignature: codeSignature(`${question?.prompt ?? ''}\n${question?.groupPrompt ?? ''}`),
     imageCount: [
       ...extractImageTags(question?.prompt),
       ...extractImageTags(question?.groupPrompt),
@@ -312,6 +358,22 @@ function textSignature(text) {
     .join(' ')
 }
 
+function codeSignature(text) {
+  const snippets = [...String(text ?? '').matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/gi)]
+    .map((match) => match[1])
+    .join('\n')
+  if (!snippets.trim()) return ''
+  return snippets
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, ' string ')
+    .replace(/\b\d+(?:\.\d+)?\b/g, ' number ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 420)
+}
+
 function isGeneratedQuestionSet(set) {
   const id = String(set?.id ?? '')
   const sourceType = String(set?.sourceType ?? set?.source_type ?? '')
@@ -359,6 +421,40 @@ function lectureTextBlock(usableFiles) {
 --- BEGIN FILE: ${file.name} ---
 ${file.text}
 --- END FILE: ${file.name} ---
+`).join('\n')
+}
+
+function sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles }) {
+  if (sourceManifest) {
+    return `${JSON.stringify(sourceManifest, null, 2)}
+
+Use these paths directly. You are a coding agent with filesystem access:
+- Inspect the listed lecture files and assignment folders yourself with shell commands.
+- For PDFs, use local tools such as pdftotext when useful; do not ask for pasted PDF text.
+- Read only the portions needed to ground the exam.
+- Use assignment folders/code examples to match languages, APIs, helper names, style, difficulty, and bug patterns.
+- Do not invent unrelated programming domains, libraries, or APIs that are absent from these sources.
+- Do not copy full assignment solutions verbatim; write fresh exam questions using the same scope and idioms.`
+  }
+
+  return [
+    'Selected source text:',
+    lectureTextBlock(usableFiles || []),
+    '',
+    'Course code examples and assignment scope:',
+    codeExampleBlock(codeExampleFiles || []),
+  ].join('\n')
+}
+
+function codeExampleBlock(codeExampleFiles) {
+  if (!Array.isArray(codeExampleFiles) || codeExampleFiles.length === 0) {
+    return 'none'
+  }
+
+  return codeExampleFiles.map((file) => `
+--- BEGIN CODE EXAMPLE: ${file.name} ---
+${file.text}
+--- END CODE EXAMPLE: ${file.name} ---
 `).join('\n')
 }
 

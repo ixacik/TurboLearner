@@ -12,6 +12,7 @@ import {
 } from 'react'
 import type {
   ComponentProps,
+  ComponentType,
   CSSProperties,
   FormEvent,
   PointerEvent as ReactPointerEvent,
@@ -25,6 +26,21 @@ import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import mermaid from 'mermaid'
+import {
+  Braces,
+  File,
+  FileCode2,
+  FilePlus,
+  FileJson,
+  FileSpreadsheet,
+  FileTerminal,
+  FileText,
+  FileType,
+  FolderOpen,
+  FolderPlus,
+  NotebookText,
+} from 'lucide-react'
+import type { LucideProps } from 'lucide-react'
 import { Link, useLoaderData, useNavigate, useParams, useSearchParams } from 'react-router'
 import type { LoaderFunctionArgs } from 'react-router'
 import 'katex/dist/katex.min.css'
@@ -125,6 +141,8 @@ type ContextStatus = 'idle' | 'processing' | 'ready' | 'error'
 
 type ContextFile = {
   name: string
+  sourceKind?: SourceKind
+  relativePath?: string
   size: number
   extension: string
 }
@@ -134,6 +152,10 @@ type CourseContextState = {
   fileCount: number
   files: ContextFile[]
   generatedAt: string | null
+  startedAt: string | null
+  completedAt: string | null
+  threadId: string | null
+  log: ExamGenerationLogEntry[]
   injectedPrompt: string
   error: string | null
 }
@@ -154,6 +176,8 @@ type Topic = {
 type TopicSource = {
   id: string
   name: string
+  sourceKind: SourceKind
+  relativePath: string
   size: number
   extension: string
   extractionStatus: 'pending' | 'ready' | 'error'
@@ -161,6 +185,99 @@ type TopicSource = {
   createdAt: string
   updatedAt: string
 }
+
+type SourceSidebarItem = {
+  key: string
+  name: string
+  size: number
+  extractionStatus: TopicSource['extractionStatus']
+  extractionError: string | null
+  sourceIds: string[]
+} & ({
+  kind: 'source'
+  source: TopicSource
+} | {
+  kind: 'folder'
+  fileCount: number
+  sortDate: string
+})
+
+type SourceKind = 'lecture' | 'code-example'
+type SourceUploadKind = SourceKind | 'auto'
+
+type SourceUploadInput = File | {
+  file: File
+  relativePath?: string
+}
+
+type SourceFileSystemFileHandle = {
+  kind: 'file'
+  name: string
+  getFile: () => Promise<File>
+}
+
+type SourceFileSystemDirectoryHandle = {
+  kind: 'directory'
+  name: string
+  values: () => AsyncIterable<SourceFileSystemFileHandle | SourceFileSystemDirectoryHandle>
+}
+
+type SourceDirectoryPickerWindow = Window & {
+  showDirectoryPicker?: () => Promise<SourceFileSystemDirectoryHandle>
+}
+
+const assignmentFolderExtensions = new Set([
+  '.pdf',
+  '.py',
+  '.js',
+  '.jsx',
+  '.ts',
+  '.tsx',
+  '.ipynb',
+  '.java',
+  '.c',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.cs',
+  '.go',
+  '.rs',
+  '.rb',
+  '.php',
+  '.html',
+  '.css',
+  '.sql',
+  '.sh',
+  '.yml',
+  '.yaml',
+  '.txt',
+  '.md',
+  '.csv',
+  '.json',
+  '.log',
+])
+
+const ignoredAssignmentFolderSegments = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  '.venv',
+  'venv',
+  '__pycache__',
+])
+
+const ignoredAssignmentFolderFiles = new Set([
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'bun.lockb',
+  'poetry.lock',
+  'pipfile.lock',
+  'cargo.lock',
+  'composer.lock',
+])
 
 type TopicRouteState = {
   topicId: string
@@ -280,6 +397,10 @@ const emptyCourseContextState: CourseContextState = {
   fileCount: 0,
   files: [],
   generatedAt: null,
+  startedAt: null,
+  completedAt: null,
+  threadId: null,
+  log: [],
   injectedPrompt: '',
   error: null,
 }
@@ -1322,12 +1443,20 @@ function App() {
     tutorSessionId,
   ])
 
-  const uploadTopicSourceFiles = useCallback(async (files: FileList | File[]) => {
+  const uploadTopicSourceFiles = useCallback(async (files: FileList | SourceUploadInput[], sourceKind: SourceUploadKind = 'auto') => {
     if (!selectedTopicId) return
     const selectedFiles = Array.from(files)
     if (selectedFiles.length === 0) return
     const formData = new FormData()
-    for (const file of selectedFiles) formData.append('files', file)
+    formData.append('kind', sourceKind)
+    for (const item of selectedFiles) {
+      const hasExplicitPath = isSourceUploadEntry(item)
+      const file = hasExplicitPath ? item.file : item
+      const relativePath = hasExplicitPath
+        ? item.relativePath
+        : (item as File & { webkitRelativePath?: string }).webkitRelativePath
+      formData.append('files', file, relativePath || file.name)
+    }
 
     try {
       const response = await fetch(`/api/topics/${selectedTopicId}/sources/files`, {
@@ -1378,6 +1507,21 @@ function App() {
     if (!response.ok) throw new Error(await response.text())
     applyCourseContextState(await response.json() as CourseContextState)
     setIsContextModalOpen(false)
+  }, [applyCourseContextState, selectedTopicId])
+
+  const restartCourseContext = useCallback(async () => {
+    if (!selectedTopicId) return
+    setIsContextModalOpen(true)
+    const response = await fetch(`/api/topics/${selectedTopicId}/context/generate`, { method: 'POST' })
+    if (!response.ok) throw new Error(await response.text())
+    applyCourseContextState(await response.json() as CourseContextState)
+  }, [applyCourseContextState, selectedTopicId])
+
+  const stopCourseContext = useCallback(async () => {
+    if (!selectedTopicId) return
+    const response = await fetch(`/api/topics/${selectedTopicId}/context/stop`, { method: 'POST' })
+    if (!response.ok) throw new Error(await response.text())
+    applyCourseContextState(await response.json() as CourseContextState)
   }, [applyCourseContextState, selectedTopicId])
 
   const clearExamGeneration = useCallback(async () => {
@@ -1475,6 +1619,8 @@ function App() {
             context={courseContext}
             onClear={() => void clearCourseContext()}
             onClose={() => setIsContextModalOpen(false)}
+            onRestart={() => void restartCourseContext()}
+            onStop={() => void stopCourseContext()}
           />
         )}
         {isExamGenerationModalOpen && (
@@ -1569,7 +1715,9 @@ function App() {
         onCloseContextModal={() => setIsContextModalOpen(false)}
         onMarkCodexLogUserScroll={markCodexLogUserScroll}
         onOpenContextModal={() => setIsContextModalOpen(true)}
+        onRestartContext={restartCourseContext}
         onSendChat={sendChat}
+        onStopContext={stopCourseContext}
         result={result}
         resetKey={tutorSessionId}
         streamingMessageKind={streamingMessageKind}
@@ -1753,7 +1901,9 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
   onCloseContextModal: () => void
   onMarkCodexLogUserScroll: () => void
   onOpenContextModal: () => void
+  onRestartContext: () => void | Promise<void>
   onSendChat: (input: string) => void | Promise<void>
+  onStopContext: () => void | Promise<void>
   resetKey: string
   result: TutorResponse | null
   streamingMessageKind: TutorMessage['kind'] | null
@@ -1770,7 +1920,9 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
   onCloseContextModal,
   onMarkCodexLogUserScroll,
   onOpenContextModal,
+  onRestartContext,
   onSendChat,
+  onStopContext,
   resetKey,
   result,
   streamingMessageKind,
@@ -1934,6 +2086,8 @@ const CodexPanel = memo(forwardRef<ChatComposerHandle, {
           context={courseContext}
           onClear={() => void onClearContext()}
           onClose={onCloseContextModal}
+          onRestart={() => void onRestartContext()}
+          onStop={() => void onStopContext()}
         />
       )}
     </aside>
@@ -1944,11 +2098,16 @@ const ContextModal = memo(function ContextModal({
   context,
   onClear,
   onClose,
+  onRestart,
+  onStop,
 }: {
   context: CourseContextState
   onClear: () => void
   onClose: () => void
+  onRestart: () => void
+  onStop: () => void
 }) {
+  const isProcessing = context.status === 'processing'
   return (
     <div
       className="modal-backdrop"
@@ -1966,7 +2125,7 @@ const ContextModal = memo(function ContextModal({
         <header className="context-modal-header">
           <div>
             <p className="eyebrow">Persistent Context</p>
-            <h2 id="context-modal-title">{context.fileCount} files loaded</h2>
+            <h2 id="context-modal-title">{contextModalTitle(context)}</h2>
           </div>
           <button className="ghost-button" type="button" onClick={onClose}>
             Close
@@ -1974,7 +2133,11 @@ const ContextModal = memo(function ContextModal({
         </header>
 
         <div className="context-modal-meta">
-          <span>{context.generatedAt ? formatDateTime(context.generatedAt) : 'No generation timestamp'}</span>
+          <span>Status: {context.status}</span>
+          {context.startedAt && <span>Started {formatDateTime(context.startedAt)}</span>}
+          {context.completedAt && <span>Finished {formatDateTime(context.completedAt)}</span>}
+          {context.generatedAt && <span>Generated {formatDateTime(context.generatedAt)}</span>}
+          {context.threadId && <span>Thread {context.threadId}</span>}
           {context.error && <span>{context.error}</span>}
         </div>
 
@@ -1987,9 +2150,45 @@ const ContextModal = memo(function ContextModal({
           ))}
         </ul>
 
+        {context.error && <div className="error-box">{context.error}</div>}
+
+        <div className="exam-generation-feed context-generation-feed">
+          {context.log.length > 0 ? (
+            compactExamGenerationLog(context.log).map((entry) => (
+              <div key={entry.id} className={`exam-generation-event event-${entry.kind}`}>
+                <div className="exam-generation-event-label">
+                  {examGenerationEventLabel(entry)}
+                  <span>{formatEventTime(entry.at)}</span>
+                </div>
+                <div className="exam-generation-event-body">
+                  {entry.kind === 'assistant' ? (
+                    <MarkdownBlock mode="chat">{entry.message}</MarkdownBlock>
+                  ) : (
+                    <>
+                      <strong>{entry.message}</strong>
+                      {entry.detail && <small>{entry.detail}</small>}
+                    </>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="empty-chat">No context generation activity yet.</div>
+          )}
+        </div>
+
         <pre className="context-prompt-preview">{context.injectedPrompt || 'No injected prompt is stored.'}</pre>
 
         <footer className="context-modal-actions">
+          {isProcessing ? (
+            <button className="danger-button" type="button" onClick={onStop}>
+              Stop generation
+            </button>
+          ) : (
+            <button className="secondary-button" type="button" onClick={onRestart}>
+              {context.status === 'idle' ? 'Generate context' : 'Restart generation'}
+            </button>
+          )}
           <button className="secondary-button" type="button" onClick={onClear}>
             Clear context
           </button>
@@ -2006,6 +2205,13 @@ function contextButtonLabel(context: CourseContextState) {
   }
   if (context.status === 'error') return 'Context error'
   return 'Context'
+}
+
+function contextModalTitle(context: CourseContextState) {
+  if (context.status === 'processing') return 'Generating context'
+  if (context.status === 'error') return 'Context generation failed'
+  if (context.status === 'ready') return `${context.fileCount} file${context.fileCount === 1 ? '' : 's'} loaded`
+  return 'Course context'
 }
 
 function courseContextSignature(context: CourseContextState) {
@@ -2033,6 +2239,66 @@ function formatBytes(value: number) {
     unitIndex += 1
   }
   return `${size >= 10 || unitIndex === 0 ? Math.round(size) : size.toFixed(1)} ${units[unitIndex]}`
+}
+
+function isSourceUploadEntry(item: SourceUploadInput): item is { file: File; relativePath?: string } {
+  return typeof item === 'object' && item !== null && 'file' in item
+}
+
+function isAbortError(error: unknown) {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'name' in error &&
+    error.name === 'AbortError'
+  )
+}
+
+async function collectAssignmentFolderFiles(
+  directory: SourceFileSystemDirectoryHandle,
+  pathPrefix = directory.name,
+): Promise<SourceUploadInput[]> {
+  const files: SourceUploadInput[] = []
+  for await (const entry of directory.values()) {
+    const relativePath = `${pathPrefix}/${entry.name}`
+    if (entry.kind === 'directory') {
+      if (!shouldSkipAssignmentFolderPath(relativePath, true)) {
+        files.push(...await collectAssignmentFolderFiles(entry, relativePath))
+      }
+      continue
+    }
+
+    if (shouldSkipAssignmentFolderPath(relativePath, false)) continue
+    files.push({
+      file: await entry.getFile(),
+      relativePath,
+    })
+  }
+  return files
+}
+
+function filterAssignmentFolderFileList(files: FileList): SourceUploadInput[] {
+  return Array.from(files)
+    .map((file) => ({
+      file,
+      relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+    }))
+    .filter(({ relativePath }) => !shouldSkipAssignmentFolderPath(relativePath, false))
+}
+
+function shouldSkipAssignmentFolderPath(relativePath: string, isDirectory: boolean) {
+  const segments = relativePath
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+  const lowerSegments = segments.map((segment) => segment.toLowerCase())
+  if (lowerSegments.some((segment) => ignoredAssignmentFolderSegments.has(segment))) return true
+  if (isDirectory) return false
+
+  const fileName = lowerSegments.at(-1) ?? ''
+  if (ignoredAssignmentFolderFiles.has(fileName)) return true
+  const extension = fileName.includes('.') ? `.${fileName.split('.').pop()}` : ''
+  return !assignmentFolderExtensions.has(extension)
 }
 
 function selectedTutorMessageElement(selection: Selection, root: HTMLElement) {
@@ -2588,12 +2854,14 @@ function ExamMenu({
   onDeleteSource: (sourceId: string) => void | Promise<void>
   onDeleteExam: (setId: string) => void | Promise<void>
   onGenerateExam: () => void | Promise<void>
-  onUploadSourceFiles: (files: FileList | File[]) => void | Promise<void>
+  onUploadSourceFiles: (files: FileList | SourceUploadInput[], sourceKind?: SourceUploadKind) => void | Promise<void>
   onOpenContextModal: () => void
   onOpenExamGenerationModal: () => void
   error: string | null
 }) {
   const sourceInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
+  const [sourceUploadError, setSourceUploadError] = useState<string | null>(null)
   const [examDeleteTarget, setExamDeleteTarget] = useState<QuestionSet | null>(null)
   const [isDeletingExam, setIsDeletingExam] = useState(false)
   const [deleteExamError, setDeleteExamError] = useState<string | null>(null)
@@ -2606,6 +2874,28 @@ function ExamMenu({
     setExamDeleteTarget(null)
     setDeleteExamError(null)
   }, [isDeletingExam])
+
+  const uploadAssignmentFolder = useCallback(async () => {
+    const showDirectoryPicker = (window as SourceDirectoryPickerWindow).showDirectoryPicker
+    if (!showDirectoryPicker) {
+      folderInputRef.current?.click()
+      return
+    }
+
+    try {
+      const directory = await showDirectoryPicker()
+      const files = await collectAssignmentFolderFiles(directory)
+      if (files.length === 0) {
+        setSourceUploadError('No supported source files were found in that folder.')
+        return
+      }
+      setSourceUploadError(null)
+      await onUploadSourceFiles(files, 'code-example')
+    } catch (folderError) {
+      if (isAbortError(folderError)) return
+      setSourceUploadError(String(folderError))
+    }
+  }, [onUploadSourceFiles])
 
   const confirmDeleteExam = useCallback(async () => {
     if (!examDeleteTarget || isDeletingExam) return
@@ -2621,6 +2911,8 @@ function ExamMenu({
     }
   }, [examDeleteTarget, isDeletingExam, onDeleteExam])
 
+  const sourceItems = useMemo(() => sourceSidebarItems(sources), [sources])
+
   return (
     <section className="menu-screen topic-exam-screen">
       <aside className="source-sidebar">
@@ -2632,11 +2924,39 @@ function ExamMenu({
           ref={sourceInputRef}
           className="context-file-input"
           type="file"
-          accept=".pdf,.txt,.md,.csv,.json,.log,application/pdf,text/*"
+          accept=".pdf,.txt,.md,.csv,.json,.log,.py,.js,.jsx,.ts,.tsx,.ipynb,.java,.c,.cpp,.h,.hpp,.cs,.go,.rs,.rb,.php,.html,.css,.sql,.sh,.yml,.yaml,application/pdf,text/*,application/json"
           multiple
           onChange={(event) => {
             const { files } = event.currentTarget
-            if (files?.length) void onUploadSourceFiles(files)
+            if (files?.length) {
+              setSourceUploadError(null)
+              const supportedFiles = filterAssignmentFolderFileList(files)
+              if (supportedFiles.length > 0) {
+                void onUploadSourceFiles(supportedFiles, 'auto')
+              } else {
+                setSourceUploadError('No supported source files were found in that folder.')
+              }
+            }
+            event.currentTarget.value = ''
+          }}
+        />
+        <input
+          ref={folderInputRef}
+          className="context-file-input"
+          type="file"
+          multiple
+          {...{ webkitdirectory: '' }}
+          onChange={(event) => {
+            const { files } = event.currentTarget
+            if (files?.length) {
+              setSourceUploadError(null)
+              const supportedFiles = filterAssignmentFolderFileList(files)
+              if (supportedFiles.length > 0) {
+                void onUploadSourceFiles(supportedFiles, 'code-example')
+              } else {
+                setSourceUploadError('No supported source files were found in that folder.')
+              }
+            }
             event.currentTarget.value = ''
           }}
         />
@@ -2645,16 +2965,24 @@ function ExamMenu({
           <button
             className="source-add-button"
             type="button"
-            aria-label="Add lectures"
-            title="Add lectures"
+            aria-label="Add files"
+            title="Add files"
             onClick={() => sourceInputRef.current?.click()}
           >
-            <PlusIcon />
+            <FileIcon />
+          </button>
+          <button
+            className="source-add-button"
+            type="button"
+            aria-label="Add folder"
+            title="Add folder"
+            onClick={() => void uploadAssignmentFolder()}
+          >
+            <FolderIcon />
           </button>
           <button
             className={`context-button context-${context.status}`}
             type="button"
-            disabled={context.status === 'processing'}
             onClick={onOpenContextModal}
           >
             {context.status === 'processing' && <span className="context-spinner" aria-hidden="true" />}
@@ -2662,26 +2990,29 @@ function ExamMenu({
           </button>
         </div>
 
+        {sourceUploadError && <div className="error-box source-error-box">{sourceUploadError}</div>}
+
         <div className="source-list">
           {sources.length === 0 ? (
-            <div className="empty-chat">No lecture sources yet.</div>
-          ) : sources.map((source) => (
-            <div key={source.id} className={`source-row source-${source.extractionStatus}`}>
-              <PdfSourceIcon />
+            <div className="empty-chat">No sources yet.</div>
+          ) : sourceItems.map((item) => (
+            <div key={item.key} className={`source-row source-${item.extractionStatus}`}>
+              {item.kind === 'folder' ? <SourceFolderIcon /> : <SourceKindIcon source={item.source} />}
               <div>
-                <strong>{source.name}</strong>
+                <strong>{item.name}</strong>
                 <small>
-                  {formatBytes(source.size)}
-                  {source.extractionStatus !== 'ready' ? ` · ${source.extractionStatus}` : ''}
-                  {source.extractionError ? ` · ${source.extractionError}` : ''}
+                  {item.kind === 'folder' ? `Folder · ${item.fileCount} files` : 'Source'} ·{' '}
+                  {formatBytes(item.size)}
+                  {item.extractionStatus !== 'ready' ? ` · ${item.extractionStatus}` : ''}
+                  {item.extractionError ? ` · ${item.extractionError}` : ''}
                 </small>
               </div>
               <button
                 className="source-remove-button"
                 type="button"
-                aria-label={`Remove ${source.name}`}
-                title={`Remove ${source.name}`}
-                onClick={() => void onDeleteSource(source.id)}
+                aria-label={`Remove ${item.name}`}
+                title={`Remove ${item.name}`}
+                onClick={() => void deleteSourceSidebarItem(item, onDeleteSource)}
               >
                 <TrashIcon />
               </button>
@@ -2774,24 +3105,173 @@ function ExamMenu({
   )
 }
 
-function PdfSourceIcon() {
+function sourceSidebarItems(sources: TopicSource[]): SourceSidebarItem[] {
+  const items: SourceSidebarItem[] = []
+  const folderItems = new Map<string, Extract<SourceSidebarItem, { kind: 'folder' }>>()
+
+  for (const source of sources) {
+    const folderName = sourceFolderName(source)
+    if (!folderName) {
+      items.push({
+        kind: 'source',
+        key: source.id,
+        name: source.relativePath || source.name,
+        size: source.size,
+        extractionStatus: source.extractionStatus,
+        extractionError: source.extractionError,
+        sourceIds: [source.id],
+        source,
+      })
+      continue
+    }
+
+    const folderKey = `folder:${folderName}`
+    const existing = folderItems.get(folderKey)
+    if (existing) {
+      existing.size += source.size
+      existing.fileCount += 1
+      existing.sourceIds.push(source.id)
+      existing.extractionStatus = combineSourceStatus(existing.extractionStatus, source.extractionStatus)
+      if (!existing.extractionError && source.extractionError) existing.extractionError = source.extractionError
+      if (source.createdAt < existing.sortDate) existing.sortDate = source.createdAt
+      continue
+    }
+
+    const folderItem: Extract<SourceSidebarItem, { kind: 'folder' }> = {
+      kind: 'folder',
+      key: folderKey,
+      name: folderName,
+      size: source.size,
+      extractionStatus: source.extractionStatus,
+      extractionError: source.extractionError,
+      sourceIds: [source.id],
+      fileCount: 1,
+      sortDate: source.createdAt,
+    }
+    folderItems.set(folderKey, folderItem)
+    items.push(folderItem)
+  }
+
+  return items.sort((left, right) => sourceItemSortDate(left).localeCompare(sourceItemSortDate(right)))
+}
+
+function sourceFolderName(source: TopicSource) {
+  const parts = source.relativePath.split('/').filter(Boolean)
+  return parts.length > 1 ? parts[0] : ''
+}
+
+function sourceItemSortDate(item: SourceSidebarItem) {
+  return item.kind === 'folder' ? item.sortDate : item.source.createdAt
+}
+
+function combineSourceStatus(
+  current: TopicSource['extractionStatus'],
+  next: TopicSource['extractionStatus'],
+): TopicSource['extractionStatus'] {
+  if (current === 'pending' || next === 'pending') return 'pending'
+  if (current === 'error' || next === 'error') return 'error'
+  return 'ready'
+}
+
+async function deleteSourceSidebarItem(
+  item: SourceSidebarItem,
+  onDeleteSource: (sourceId: string) => void | Promise<void>,
+) {
+  for (const sourceId of item.sourceIds) {
+    await Promise.resolve(onDeleteSource(sourceId))
+  }
+}
+
+function SourceKindIcon({ source }: { source: TopicSource }) {
+  const icon = sourceIconMeta(source)
+  const Icon = icon.Icon
   return (
-    <svg className="source-pdf-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path className="source-pdf-page" d="M5 2h10l4 4v16H5z" />
-      <path className="source-pdf-fold" d="M15 2v4h4z" />
-      <path className="source-pdf-label" d="M7 12h10v6H7z" />
-      <text x="12" y="16.25" textAnchor="middle">PDF</text>
-    </svg>
+    <span className={`source-kind-icon source-kind-${icon.tone}`} title={icon.label}>
+      <Icon size={27} strokeWidth={2.1} absoluteStrokeWidth aria-hidden="true" />
+      <span className="source-kind-extension">{icon.label}</span>
+    </span>
   )
 }
 
-function PlusIcon() {
+function SourceFolderIcon() {
   return (
-    <svg className="source-plus-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14" />
-      <path d="M5 12h14" />
-    </svg>
+    <span className="source-kind-icon source-kind-folder" title="Folder">
+      <FolderOpen size={28} strokeWidth={2.1} absoluteStrokeWidth aria-hidden="true" />
+      <span className="source-kind-extension">DIR</span>
+    </span>
   )
+}
+
+function sourceIconMeta(source: TopicSource): {
+  label: string
+  tone: string
+  Icon: ComponentType<LucideProps>
+} {
+  const extension = (source.extension || source.name.split('.').pop() || '').replace(/^\./, '').toLowerCase()
+  switch (extension) {
+    case 'pdf':
+      return { label: 'PDF', tone: 'pdf', Icon: FileText }
+    case 'ipynb':
+      return { label: 'NB', tone: 'notebook', Icon: NotebookText }
+    case 'py':
+      return { label: 'PY', tone: 'python', Icon: FileCode2 }
+    case 'js':
+    case 'jsx':
+      return { label: extension.toUpperCase(), tone: 'javascript', Icon: FileCode2 }
+    case 'ts':
+    case 'tsx':
+      return { label: extension.toUpperCase(), tone: 'typescript', Icon: FileCode2 }
+    case 'json':
+      return { label: 'JSON', tone: 'json', Icon: FileJson }
+    case 'md':
+      return { label: 'MD', tone: 'markdown', Icon: FileType }
+    case 'csv':
+      return { label: 'CSV', tone: 'csv', Icon: FileSpreadsheet }
+    case 'yml':
+    case 'yaml':
+      return { label: 'YML', tone: 'yaml', Icon: Braces }
+    case 'html':
+      return { label: 'HTML', tone: 'html', Icon: FileCode2 }
+    case 'css':
+      return { label: 'CSS', tone: 'css', Icon: FileCode2 }
+    case 'sql':
+      return { label: 'SQL', tone: 'sql', Icon: FileSpreadsheet }
+    case 'txt':
+    case 'log':
+      return { label: extension.toUpperCase(), tone: 'text', Icon: FileText }
+    case 'java':
+      return { label: 'JAVA', tone: 'java', Icon: FileCode2 }
+    case 'cpp':
+    case 'hpp':
+      return { label: 'C++', tone: 'cpp', Icon: FileCode2 }
+    case 'c':
+    case 'h':
+      return { label: 'C', tone: 'cpp', Icon: FileCode2 }
+    case 'cs':
+      return { label: 'C#', tone: 'csharp', Icon: FileCode2 }
+    case 'go':
+      return { label: 'GO', tone: 'go', Icon: FileCode2 }
+    case 'rs':
+      return { label: 'RS', tone: 'rust', Icon: FileCode2 }
+    case 'rb':
+      return { label: 'RB', tone: 'ruby', Icon: FileCode2 }
+    case 'php':
+      return { label: 'PHP', tone: 'php', Icon: FileCode2 }
+    case 'sh':
+      return { label: 'SH', tone: 'shell', Icon: FileTerminal }
+    default:
+      return source.sourceKind === 'code-example'
+        ? { label: 'CODE', tone: 'code', Icon: FileCode2 }
+        : { label: 'FILE', tone: 'file', Icon: File }
+  }
+}
+
+function FileIcon({ className = 'source-add-icon' }: { className?: string }) {
+  return <FilePlus className={className} size={22} strokeWidth={2.2} absoluteStrokeWidth aria-hidden="true" />
+}
+
+function FolderIcon({ className = 'source-add-icon' }: { className?: string }) {
+  return <FolderPlus className={className} size={22} strokeWidth={2.2} absoluteStrokeWidth aria-hidden="true" />
 }
 
 function BackCaretIcon() {

@@ -9,10 +9,20 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import {
+  assertGeneratedChoiceAnswerDistribution,
   buildExamDraftGenerationPrompt,
   buildExamReviewPrompt,
   createExamGenerationPromptContext,
 } from './examGenerationHelpers.mjs'
+import {
+  extractSourceFile,
+  inferSourceKind,
+  isTopicContextSource,
+  normalizeSourceKind,
+  publicSourceFromRow,
+  sanitizeRelativePath,
+  shouldSkipFolderSource,
+} from './sourceExtraction.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appRoot = path.resolve(__dirname, '..')
@@ -36,8 +46,6 @@ const topicsDir = path.join(contextDir, 'topics')
 const defaultTopicId = 'machine-learning'
 const defaultTopicName = 'Machine Learning'
 const defaultTopicEmoji = '🧠'
-const textFileExtensions = new Set(['.txt', '.md', '.csv', '.json', '.log'])
-const acceptedContextExtensions = new Set(['.pdf', ...textFileExtensions])
 const examGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_EXAM_GENERATION_TURN_TIMEOUT_MS || 20 * 60 * 1000)
 
 const tutorThreads = new Map()
@@ -61,6 +69,7 @@ app.use(express.json({ limit: '25mb' }))
 
 const uploadTopicSources = multer({
   storage: multer.memoryStorage(),
+  preservePath: true,
   limits: {
     files: 48,
     fileSize: 100 * 1024 * 1024,
@@ -181,13 +190,18 @@ app.get('/api/topics/:topicId/sources', (req, res) => {
 app.post('/api/topics/:topicId/sources/files', uploadTopicSources.array('files', 48), async (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
+    const requestedKind = String(req.body?.kind || 'auto')
     const files = Array.isArray(req.files) ? req.files : []
     if (files.length === 0) {
       res.status(400).json({ error: 'No files uploaded.' })
       return
     }
-    for (const file of files) await storeTopicSourceUpload(topicId, file)
-    queueTopicContextRefresh(topicId)
+    let shouldRefreshContext = false
+    for (const file of files) {
+      const storedSource = await storeTopicSourceUpload(topicId, file, requestedKind)
+      if (storedSource.contextEligible) shouldRefreshContext = true
+    }
+    if (shouldRefreshContext) queueTopicContextRefresh(topicId)
     res.status(201).json({ sources: listTopicSources(topicId), context: publicTopicContextState(topicId) })
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
@@ -197,8 +211,8 @@ app.post('/api/topics/:topicId/sources/files', uploadTopicSources.array('files',
 app.delete('/api/topics/:topicId/sources/:sourceId', (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
-    deleteTopicSource(topicId, req.params.sourceId)
-    queueTopicContextRefresh(topicId)
+    const deletedSource = deleteTopicSource(topicId, req.params.sourceId)
+    if (deletedSource.contextEligible) queueTopicContextRefresh(topicId)
     res.json({ sources: listTopicSources(topicId), context: publicTopicContextState(topicId) })
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
@@ -217,12 +231,22 @@ app.get('/api/topics/:topicId/context', (req, res) => {
 app.post('/api/topics/:topicId/context/generate', (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
-    if (listTopicSources(topicId).length === 0) {
-      res.status(400).json({ error: 'Upload lecture sources before generating context.' })
+    if (!hasTopicContextSources(topicId)) {
+      res.status(400).json({ error: 'Upload PDF, TXT, or MD sources before generating context.' })
       return
     }
     queueTopicContextRefresh(topicId)
     res.status(202).json(publicTopicContextState(topicId))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics/:topicId/context/stop', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    stopTopicContextGeneration(topicId)
+    res.json(publicTopicContextState(topicId))
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
   }
@@ -260,7 +284,7 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
     const topicId = requireTopicId(req.params.topicId)
     const sources = listTopicSources(topicId)
     if (sources.length === 0) {
-      res.status(400).json({ error: 'Upload lecture sources before generating an exam.' })
+      res.status(400).json({ error: 'Upload sources before generating an exam.' })
       return
     }
     const jobId = randomUUID()
@@ -737,7 +761,7 @@ function persistentCourseContextInstructions(topicId = defaultTopicId) {
   return `
 ## TurboLearner Persistent Course Context
 
-The following course scope was generated from learner-selected lecture files and is persistent.
+The following course scope was generated from learner-selected source files and is persistent.
 Use it as the source of truth for what this course covered and at what depth.
 You may use general knowledge to explain listed covered concepts, but align grading and expected
 answers to the listed scope, notation, terminology, framing, and lecture-specific nuances.
@@ -1146,6 +1170,8 @@ function initializeDatabase() {
       id TEXT PRIMARY KEY,
       topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
       original_name TEXT NOT NULL,
+      source_kind TEXT NOT NULL DEFAULT 'lecture',
+      relative_path TEXT NOT NULL DEFAULT '',
       stored_path TEXT NOT NULL,
       extracted_text_path TEXT,
       size INTEGER NOT NULL DEFAULT 0,
@@ -1163,6 +1189,10 @@ function initializeDatabase() {
       injected_prompt TEXT NOT NULL DEFAULT '',
       error TEXT,
       job_id TEXT,
+      thread_id TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      log_json TEXT NOT NULL DEFAULT '[]',
       updated_at TEXT NOT NULL
     );
 
@@ -1200,8 +1230,36 @@ function initializeDatabase() {
       PRIMARY KEY (topic_id, set_id)
     );
   `)
+  ensureTopicSourceColumns(database)
+  ensureTopicContextColumns(database)
   seedDefaultTopic(database)
   return database
+}
+
+function ensureTopicSourceColumns(database) {
+  const columns = new Set(database.prepare('PRAGMA table_info(topic_sources)').all().map((column) => column.name))
+  if (!columns.has('source_kind')) {
+    database.exec("ALTER TABLE topic_sources ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'lecture'")
+  }
+  if (!columns.has('relative_path')) {
+    database.exec("ALTER TABLE topic_sources ADD COLUMN relative_path TEXT NOT NULL DEFAULT ''")
+  }
+}
+
+function ensureTopicContextColumns(database) {
+  const columns = new Set(database.prepare('PRAGMA table_info(topic_contexts)').all().map((column) => column.name))
+  if (!columns.has('thread_id')) {
+    database.exec('ALTER TABLE topic_contexts ADD COLUMN thread_id TEXT')
+  }
+  if (!columns.has('started_at')) {
+    database.exec('ALTER TABLE topic_contexts ADD COLUMN started_at TEXT')
+  }
+  if (!columns.has('completed_at')) {
+    database.exec('ALTER TABLE topic_contexts ADD COLUMN completed_at TEXT')
+  }
+  if (!columns.has('log_json')) {
+    database.exec("ALTER TABLE topic_contexts ADD COLUMN log_json TEXT NOT NULL DEFAULT '[]'")
+  }
 }
 
 function seedDefaultTopic(database) {
@@ -1508,16 +1566,7 @@ function listTopicSources(topicId) {
 }
 
 function publicTopicSource(row) {
-  return {
-    id: row.id,
-    name: row.original_name,
-    size: Number(row.size) || 0,
-    extension: row.extension,
-    extractionStatus: row.extraction_status,
-    extractionError: row.extraction_error,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }
+  return publicSourceFromRow(row)
 }
 
 async function migrateLegacyContextSourcesForDefaultTopic() {
@@ -1569,6 +1618,8 @@ async function migrateLegacyContextSourcesForDefaultTopic() {
       id: sourceId,
       topicId: defaultTopicId,
       originalName: file.name,
+      sourceKind: 'lecture',
+      relativePath: '',
       storedPath: finalStoredPath,
       extractedTextPath: status === 'ready' ? extractedTextPath : null,
       size: file.size,
@@ -1582,10 +1633,10 @@ async function migrateLegacyContextSourcesForDefaultTopic() {
 
   const insert = db.prepare(`
     INSERT INTO topic_sources (
-      id, topic_id, original_name, stored_path, extracted_text_path, size, extension,
+      id, topic_id, original_name, source_kind, relative_path, stored_path, extracted_text_path, size, extension,
       extraction_status, extraction_error, created_at, updated_at
     ) VALUES (
-      @id, @topicId, @originalName, @storedPath, @extractedTextPath, @size, @extension,
+      @id, @topicId, @originalName, @sourceKind, @relativePath, @storedPath, @extractedTextPath, @size, @extension,
       @status, @error, @createdAt, @updatedAt
     )
   `)
@@ -1621,34 +1672,48 @@ function uploadSafeBasename(name, extension = path.extname(name).toLowerCase()) 
   return path.basename(name, extension).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'file'
 }
 
-async function storeTopicSourceUpload(topicId, file) {
-  const extension = path.extname(file.originalname).toLowerCase()
+async function storeTopicSourceUpload(topicId, file, rawSourceKind = 'auto') {
+  const relativePath = sanitizeRelativePath(file.originalname)
+  const isFolderUpload = relativePath.includes('/')
+  const displayName = isFolderUpload ? path.posix.basename(relativePath) : file.originalname
+  const extension = path.extname(displayName).toLowerCase()
+  const sourceKind = rawSourceKind === 'auto'
+    ? inferSourceKind(extension)
+    : normalizeSourceKind(rawSourceKind)
   const sourceId = randomUUID()
   const now = new Date().toISOString()
   const sourceDir = path.join(topicPath(topicId), 'sources')
   const extractedDir = path.join(topicPath(topicId), 'extracted')
   fs.mkdirSync(sourceDir, { recursive: true })
   fs.mkdirSync(extractedDir, { recursive: true })
-  const base = uploadSafeBasename(file.originalname, extension)
+  const base = uploadSafeBasename(displayName, extension)
   const storedPath = path.join(sourceDir, `${sourceId}-${base}${extension}`)
   const extractedTextPath = path.join(extractedDir, `${sourceId}.txt`)
-  await fs.promises.writeFile(storedPath, file.buffer)
 
   let status = 'ready'
   let error = null
+  let finalStoredPath = storedPath
   try {
-    const extracted = await extractContextFile({
-      originalName: file.originalname,
-      path: storedPath,
-      size: file.size,
-      mimetype: file.mimetype,
-      extension,
-    })
-    if (!extracted.text.trim()) {
+    if (shouldSkipFolderSource(relativePath, extension)) {
       status = 'error'
-      error = extracted.error || 'No text was extracted.'
+      error = 'Skipped folder noise or unsupported folder file.'
+      finalStoredPath = ''
     } else {
-      await fs.promises.writeFile(extractedTextPath, extracted.text, 'utf8')
+      await fs.promises.writeFile(storedPath, file.buffer)
+      const extracted = await extractContextFile({
+        originalName: displayName,
+        relativePath,
+        path: storedPath,
+        size: file.size,
+        mimetype: file.mimetype,
+        extension,
+      })
+      if (!extracted.text.trim()) {
+        status = 'error'
+        error = extracted.error || 'No text was extracted.'
+      } else {
+        await fs.promises.writeFile(extractedTextPath, extracted.text, 'utf8')
+      }
     }
   } catch (extractError) {
     status = 'error'
@@ -1657,14 +1722,16 @@ async function storeTopicSourceUpload(topicId, file) {
 
   db.prepare(`
     INSERT INTO topic_sources (
-      id, topic_id, original_name, stored_path, extracted_text_path, size, extension,
+      id, topic_id, original_name, source_kind, relative_path, stored_path, extracted_text_path, size, extension,
       extraction_status, extraction_error, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     sourceId,
     topicId,
-    file.originalname,
-    storedPath,
+    displayName,
+    sourceKind,
+    relativePath,
+    finalStoredPath,
     status === 'ready' ? extractedTextPath : null,
     file.size,
     extension,
@@ -1673,34 +1740,23 @@ async function storeTopicSourceUpload(topicId, file) {
     now,
     now,
   )
-  upsertTopicContext(topicId, {
-    status: 'idle',
-    generatedAt: null,
-    injectedPrompt: '',
-    error: null,
-    jobId: null,
-  })
+  return {
+    sourceKind,
+    extension,
+    contextEligible: isTopicContextSource({ extension, sourceKind }),
+  }
 }
 
 function deleteTopicSource(topicId, sourceId) {
   const row = db.prepare('SELECT * FROM topic_sources WHERE topic_id = ? AND id = ?').get(topicId, sourceId)
   if (!row) throw new Error('Source not found.')
+  const sourceKind = normalizeSourceKind(row.source_kind)
+  const contextEligible = isTopicContextSource({ extension: row.extension, sourceKind })
   for (const filePath of [row.stored_path, row.extracted_text_path]) {
     if (filePath && fs.existsSync(filePath)) fs.rmSync(filePath, { force: true })
   }
   db.prepare('DELETE FROM topic_sources WHERE topic_id = ? AND id = ?').run(topicId, sourceId)
-  upsertTopicContext(topicId, {
-    status: 'idle',
-    generatedAt: null,
-    injectedPrompt: '',
-    error: null,
-    jobId: null,
-  })
-}
-
-function queueTopicContextRefresh(topicId) {
-  topicContextJobs.set(topicId, randomUUID())
-  if (listTopicSources(topicId).length === 0) {
+  if (contextEligible) {
     upsertTopicContext(topicId, {
       status: 'idle',
       generatedAt: null,
@@ -1708,11 +1764,31 @@ function queueTopicContextRefresh(topicId) {
       error: null,
       jobId: null,
     })
+  }
+  return {
+    sourceKind,
+    extension: row.extension,
+    contextEligible,
+  }
+}
+
+function queueTopicContextRefresh(topicId) {
+  topicContextJobs.set(topicId, randomUUID())
+  if (!hasTopicContextSources(topicId)) {
+    upsertTopicContext(topicId, {
+      status: 'idle',
+      generatedAt: null,
+      injectedPrompt: '',
+      error: null,
+      jobId: null,
+      log: [],
+    })
     tutorThreads.clear()
     return
   }
 
   const jobId = randomUUID()
+  const startedAt = new Date().toISOString()
   topicContextJobs.set(topicId, jobId)
   upsertTopicContext(topicId, {
     status: 'processing',
@@ -1720,51 +1796,300 @@ function queueTopicContextRefresh(topicId) {
     injectedPrompt: '',
     error: null,
     jobId,
+    threadId: null,
+    startedAt,
+    completedAt: null,
+    log: [
+      examGenerationLogEntry('status', 'Queued context generation.'),
+    ],
   })
   tutorThreads.clear()
   void generatePersistentContextForTopic(topicId, jobId)
 }
 
-function topicSourceFiles(topicId) {
+function stopTopicContextGeneration(topicId) {
+  topicContextJobs.set(topicId, randomUUID())
+  const context = getTopicContext(topicId)
+  const log = [
+    ...normalizeExamGenerationLog(parseJson(context.log_json, [])),
+    examGenerationLogEntry('status', 'Stopped context generation.'),
+  ]
+  upsertTopicContext(topicId, {
+    status: 'idle',
+    generatedAt: context.generated_at ?? null,
+    injectedPrompt: context.injected_prompt ?? '',
+    error: null,
+    jobId: null,
+    threadId: context.thread_id ?? null,
+    startedAt: context.started_at ?? null,
+    completedAt: new Date().toISOString(),
+    log,
+  })
+}
+
+function appendTopicContextLog(topicId, jobId, kind, message, detail = '') {
+  if (topicContextJobs.get(topicId) !== jobId) return
+  const context = getTopicContext(topicId)
+  const text = String(message ?? '')
+  if (!text.trim()) return
+  const log = [
+    ...normalizeExamGenerationLog(parseJson(context.log_json, [])),
+    examGenerationLogEntry(kind, text, detail),
+  ].slice(-400)
+  upsertTopicContext(topicId, {
+    status: context.status,
+    generatedAt: context.generated_at ?? null,
+    injectedPrompt: context.injected_prompt ?? '',
+    error: context.error ?? null,
+    jobId,
+    threadId: context.thread_id ?? null,
+    startedAt: context.started_at ?? null,
+    completedAt: context.completed_at ?? null,
+    log,
+  })
+}
+
+function setTopicContextThreadId(topicId, jobId, threadId) {
+  if (topicContextJobs.get(topicId) !== jobId) return
+  const context = getTopicContext(topicId)
+  upsertTopicContext(topicId, {
+    status: context.status,
+    generatedAt: context.generated_at ?? null,
+    injectedPrompt: context.injected_prompt ?? '',
+    error: context.error ?? null,
+    jobId,
+    threadId,
+    startedAt: context.started_at ?? null,
+    completedAt: context.completed_at ?? null,
+    log: normalizeExamGenerationLog(parseJson(context.log_json, [])),
+  })
+}
+
+function hasTopicContextSources(topicId) {
+  return topicSourceRows(topicId).some((row) => isTopicContextSource({
+    extension: row.extension,
+    sourceKind: row.source_kind,
+  }))
+}
+
+function topicSourceRows(topicId, status = null, sourceKind = null) {
+  const params = [topicId]
+  if (sourceKind) params.push(sourceKind)
+  if (status) params.push(status)
   return db.prepare(`
     SELECT *
     FROM topic_sources
-    WHERE topic_id = ? AND extraction_status = 'ready' AND extracted_text_path IS NOT NULL
+    WHERE topic_id = ?
+      ${sourceKind ? 'AND source_kind = ?' : ''}
+      ${status ? 'AND extraction_status = ?' : ''}
     ORDER BY created_at ASC
-  `).all(topicId).map((row) => ({
-    name: row.original_name,
+  `).all(...params)
+}
+
+function topicContextSourceRows(topicId, status = null) {
+  return topicSourceRows(topicId, status).filter((row) => isTopicContextSource({
+    extension: row.extension,
+    sourceKind: row.source_kind,
+  }))
+}
+
+function topicSourceFiles(topicId, sourceKind = null) {
+  return topicSourceRows(topicId, 'ready', sourceKind)
+    .filter((row) => row.extracted_text_path)
+    .map((row) => ({
+    name: row.relative_path || row.original_name,
+    sourceKind: normalizeSourceKind(row.source_kind),
+    relativePath: row.relative_path || '',
     text: fs.existsSync(row.extracted_text_path) ? fs.readFileSync(row.extracted_text_path, 'utf8') : '',
     error: null,
   })).filter((file) => file.text.trim())
 }
 
-function topicFailedSourceFiles(topicId) {
-  return db.prepare(`
-    SELECT *
-    FROM topic_sources
-    WHERE topic_id = ? AND extraction_status = 'error'
-    ORDER BY created_at ASC
-  `).all(topicId).map((row) => ({
-    name: row.original_name,
+function topicFailedSourceFiles(topicId, sourceKind = null) {
+  return topicSourceRows(topicId, 'error', sourceKind).map((row) => ({
+    name: row.relative_path || row.original_name,
+    sourceKind: normalizeSourceKind(row.source_kind),
+    relativePath: row.relative_path || '',
     text: '',
     error: row.extraction_error || 'Extraction failed.',
   }))
 }
 
-function upsertTopicContext(topicId, { status, generatedAt, injectedPrompt, error, jobId }) {
+function topicContextSourceFiles(topicId) {
+  return topicContextSourceRows(topicId, 'ready')
+    .filter((row) => row.extracted_text_path)
+    .map((row) => ({
+      name: row.relative_path || row.original_name,
+      sourceKind: normalizeSourceKind(row.source_kind),
+      relativePath: row.relative_path || '',
+      text: fs.existsSync(row.extracted_text_path) ? fs.readFileSync(row.extracted_text_path, 'utf8') : '',
+      error: null,
+    })).filter((file) => file.text.trim())
+}
+
+function topicFailedContextSourceFiles(topicId) {
+  return topicContextSourceRows(topicId, 'error').map((row) => ({
+    name: row.relative_path || row.original_name,
+    sourceKind: normalizeSourceKind(row.source_kind),
+    relativePath: row.relative_path || '',
+    text: '',
+    error: row.extraction_error || 'Extraction failed.',
+  }))
+}
+
+function prepareTopicContextSourceManifest(topicId) {
+  const materialDir = path.join(topicPath(topicId), 'context-source-material')
+  const rows = topicSourceRows(topicId)
+    .filter((row) => isTopicContextSource({
+      extension: row.extension,
+      sourceKind: row.source_kind,
+    }))
+    .filter((row) => row.stored_path && fs.existsSync(row.stored_path))
+  if (rows.length === 0) return null
+
+  fs.rmSync(materialDir, { recursive: true, force: true })
+  fs.mkdirSync(materialDir, { recursive: true })
+
+  const usedTargets = new Set()
+  const files = rows.map((row) => {
+    const relativePath = sanitizeRelativePath(row.relative_path || row.original_name)
+    const targetPath = path.join(materialDir, uniqueManifestFileName(relativePath || row.original_name, row.id, usedTargets))
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+    fs.copyFileSync(row.stored_path, targetPath)
+    return {
+      name: row.original_name,
+      relativePath,
+      path: targetPath,
+      extension: row.extension,
+      size: Number(row.size) || 0,
+      extractionStatus: row.extraction_status,
+      extractionError: row.extraction_error || null,
+    }
+  })
+
+  return {
+    root: materialDir,
+    outputFormat: {
+      injectedPrompt: 'string containing the Course Scope Markdown to inject into tutor developer instructions',
+    },
+    files,
+  }
+}
+
+function prepareTopicExamSourceManifest(topicId, examAssetDir) {
+  const materialDir = path.join(examAssetDir, 'source-material')
+  const rows = topicSourceRows(topicId)
+    .filter((row) => row.stored_path && fs.existsSync(row.stored_path))
+  if (rows.length === 0) return null
+
+  fs.rmSync(materialDir, { recursive: true, force: true })
+  fs.mkdirSync(materialDir, { recursive: true })
+
+  const manifest = {
+    root: materialDir,
+    instructions: 'Use these filesystem paths directly. Inspect only the source files needed to ground the exam.',
+    lectureFiles: [],
+    assignmentFolders: [],
+    codeFiles: [],
+  }
+  const folderMap = new Map()
+  const usedTargets = new Set()
+
+  for (const row of rows) {
+    const sourceKind = normalizeSourceKind(row.source_kind)
+    const relativePath = sanitizeRelativePath(row.relative_path || row.original_name)
+    const isFolderUpload = relativePath.includes('/')
+    const targetPath = isFolderUpload
+      ? path.join(materialDir, 'folders', ...relativePath.split('/'))
+      : path.join(materialDir, sourceKind === 'code-example' ? 'code-examples' : 'lectures', uniqueManifestFileName(row.original_name, row.id, usedTargets))
+
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+    fs.copyFileSync(row.stored_path, targetPath)
+
+    const entry = {
+      name: row.original_name,
+      relativePath,
+      path: targetPath,
+      extension: row.extension,
+      size: Number(row.size) || 0,
+      sourceKind,
+    }
+
+    if (isFolderUpload) {
+      const folderName = relativePath.split('/')[0]
+      const folderPath = path.join(materialDir, 'folders', folderName)
+      const folder = folderMap.get(folderName) || {
+        name: folderName,
+        path: folderPath,
+        files: [],
+      }
+      folder.files.push(entry)
+      folderMap.set(folderName, folder)
+    } else if (sourceKind === 'code-example') {
+      manifest.codeFiles.push(entry)
+    } else {
+      manifest.lectureFiles.push(entry)
+    }
+  }
+
+  manifest.assignmentFolders = [...folderMap.values()]
+  return manifest
+}
+
+function uniqueManifestFileName(originalName, sourceId, usedTargets) {
+  const safeName = path.basename(sanitizeRelativePath(originalName) || 'source')
+  const extension = path.extname(safeName)
+  const base = uploadSafeBasename(safeName, extension)
+  let candidate = `${base}${extension}`
+  let index = 2
+  while (usedTargets.has(candidate)) {
+    candidate = `${base}-${sourceId.slice(0, 8)}-${index}${extension}`
+    index += 1
+  }
+  usedTargets.add(candidate)
+  return candidate
+}
+
+function upsertTopicContext(topicId, {
+  status,
+  generatedAt,
+  injectedPrompt,
+  error,
+  jobId,
+  threadId = null,
+  startedAt = null,
+  completedAt = null,
+  log = [],
+}) {
   const now = new Date().toISOString()
   db.prepare(`
     INSERT INTO topic_contexts (
-      topic_id, status, generated_at, injected_prompt, error, job_id, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      topic_id, status, generated_at, injected_prompt, error, job_id, thread_id, started_at, completed_at, log_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(topic_id) DO UPDATE SET
       status = excluded.status,
       generated_at = excluded.generated_at,
       injected_prompt = excluded.injected_prompt,
       error = excluded.error,
       job_id = excluded.job_id,
+      thread_id = excluded.thread_id,
+      started_at = excluded.started_at,
+      completed_at = excluded.completed_at,
+      log_json = excluded.log_json,
       updated_at = excluded.updated_at
-  `).run(topicId, status, generatedAt, injectedPrompt ?? '', error, jobId, now)
+  `).run(
+    topicId,
+    status,
+    generatedAt,
+    injectedPrompt ?? '',
+    error,
+    jobId,
+    threadId,
+    startedAt,
+    completedAt,
+    JSON.stringify(normalizeExamGenerationLog(log)),
+    now,
+  )
 }
 
 function getTopicContext(topicId) {
@@ -1782,8 +2107,15 @@ function getTopicContext(topicId) {
 
 function publicTopicContextState(topicId) {
   const context = getTopicContext(topicId)
-  const files = listTopicSources(topicId).map((source) => ({
+  const files = listTopicSources(topicId)
+    .filter((source) => isTopicContextSource({
+      extension: source.extension,
+      sourceKind: source.sourceKind,
+    }))
+    .map((source) => ({
     name: source.name,
+    sourceKind: source.sourceKind,
+    relativePath: source.relativePath,
     size: source.size,
     extension: source.extension,
   }))
@@ -1792,6 +2124,10 @@ function publicTopicContextState(topicId) {
     fileCount: files.length,
     files,
     generatedAt: context.generated_at ?? null,
+    startedAt: context.started_at ?? null,
+    completedAt: context.completed_at ?? null,
+    threadId: context.thread_id ?? null,
+    log: normalizeExamGenerationLog(parseJson(context.log_json, [])),
     injectedPrompt: context.injected_prompt ?? '',
     error: context.error ?? null,
   }
@@ -1870,7 +2206,13 @@ function publicTopicExamGenerationState(topicId) {
     status: job.status,
     phase: job.phase || '',
     fileCount: listTopicSources(topicId).length,
-    files: listTopicSources(topicId).map(({ name, size, extension }) => ({ name, size, extension })),
+    files: listTopicSources(topicId).map(({ name, sourceKind, relativePath, size, extension }) => ({
+      name,
+      sourceKind,
+      relativePath,
+      size,
+      extension,
+    })),
     startedAt: job.startedAt ?? null,
     completedAt: job.completedAt ?? null,
     threadId: null,
@@ -2018,6 +2360,10 @@ function emptyContextState() {
     fileCount: 0,
     files: [],
     generatedAt: null,
+    startedAt: null,
+    completedAt: null,
+    threadId: null,
+    log: [],
     injectedPrompt: '',
     error: null,
   }
@@ -2032,6 +2378,10 @@ function loadContextState() {
         fileCount: Number(rawState.fileCount) || 0,
         files: Array.isArray(rawState.files) ? rawState.files.map(publicContextFile) : [],
         generatedAt: typeof rawState.generatedAt === 'string' ? rawState.generatedAt : null,
+        startedAt: typeof rawState.startedAt === 'string' ? rawState.startedAt : null,
+        completedAt: typeof rawState.completedAt === 'string' ? rawState.completedAt : null,
+        threadId: typeof rawState.threadId === 'string' ? rawState.threadId : null,
+        log: normalizeExamGenerationLog(rawState.log),
         injectedPrompt: rawState.injectedPrompt,
         error: null,
       }
@@ -2042,6 +2392,10 @@ function loadContextState() {
         fileCount: Number(rawState.fileCount) || 0,
         files: Array.isArray(rawState.files) ? rawState.files.map(publicContextFile) : [],
         generatedAt: typeof rawState.generatedAt === 'string' ? rawState.generatedAt : null,
+        startedAt: typeof rawState.startedAt === 'string' ? rawState.startedAt : null,
+        completedAt: typeof rawState.completedAt === 'string' ? rawState.completedAt : null,
+        threadId: typeof rawState.threadId === 'string' ? rawState.threadId : null,
+        log: normalizeExamGenerationLog(rawState.log),
         injectedPrompt: typeof rawState.injectedPrompt === 'string' ? rawState.injectedPrompt : '',
         error: typeof rawState.error === 'string' ? rawState.error : 'Context generation failed.',
       }
@@ -2063,6 +2417,10 @@ function publicContextState() {
     fileCount: Number(contextState.fileCount) || 0,
     files: Array.isArray(contextState.files) ? contextState.files.map(publicContextFile) : [],
     generatedAt: contextState.generatedAt ?? null,
+    startedAt: contextState.startedAt ?? null,
+    completedAt: contextState.completedAt ?? null,
+    threadId: contextState.threadId ?? null,
+    log: normalizeExamGenerationLog(contextState.log),
     injectedPrompt: typeof contextState.injectedPrompt === 'string' ? contextState.injectedPrompt : '',
     error: typeof contextState.error === 'string' ? contextState.error : null,
   }
@@ -2309,18 +2667,31 @@ async function generatePersistentExam(jobId, files) {
 
 async function generatePersistentContextForTopic(topicId, jobId) {
   try {
-    const usableFiles = topicSourceFiles(topicId)
-    const failedFiles = topicFailedSourceFiles(topicId)
-    if (usableFiles.length === 0) {
+    appendTopicContextLog(topicId, jobId, 'status', 'Preparing context sources.')
+    const failedFiles = topicFailedContextSourceFiles(topicId)
+    const sourceManifest = prepareTopicContextSourceManifest(topicId)
+    if (!sourceManifest) {
       throw new Error([
-        'No usable text could be extracted from this topic source list.',
+        'No readable PDF, TXT, or MD sources exist for this topic.',
         ...failedFiles.map((file) => `${file.name}: ${file.error}`),
       ].filter(Boolean).join('\n'))
     }
 
-    const injectedPrompt = await summarizeCourseContextWithCodex(usableFiles, failedFiles)
+    const outputPath = path.join(topicPath(topicId), 'context-summary.json')
+    const injectedPrompt = await summarizeCourseContextWithCodex({
+      sourceManifest,
+      failedFiles,
+      outputPath,
+      topicId,
+      jobId,
+    })
     if (topicContextJobs.get(topicId) !== jobId) return
 
+    const context = getTopicContext(topicId)
+    const log = [
+      ...normalizeExamGenerationLog(parseJson(context.log_json, [])),
+      examGenerationLogEntry('status', 'Context generation complete.'),
+    ]
     upsertTopicContext(topicId, {
       status: 'ready',
       generatedAt: new Date().toISOString(),
@@ -2329,16 +2700,30 @@ async function generatePersistentContextForTopic(topicId, jobId) {
         ? `Skipped ${failedFiles.length} source${failedFiles.length === 1 ? '' : 's'} with extraction errors.`
         : null,
       jobId,
+      threadId: context.thread_id ?? null,
+      startedAt: context.started_at ?? null,
+      completedAt: new Date().toISOString(),
+      log,
     })
     tutorThreads.clear()
   } catch (error) {
     if (topicContextJobs.get(topicId) !== jobId) return
+    const context = getTopicContext(topicId)
+    const message = error instanceof Error ? error.message : String(error)
+    const log = [
+      ...normalizeExamGenerationLog(parseJson(context.log_json, [])),
+      examGenerationLogEntry('error', message),
+    ]
     upsertTopicContext(topicId, {
       status: 'error',
       generatedAt: null,
       injectedPrompt: '',
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
       jobId,
+      threadId: context.thread_id ?? null,
+      startedAt: context.started_at ?? null,
+      completedAt: new Date().toISOString(),
+      log,
     })
   }
 }
@@ -2347,38 +2732,43 @@ async function generatePersistentExamForTopic(topicId, jobId) {
   const examId = `generated-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`
   const examAssetDir = path.join(topicPath(topicId), 'generated-assets', examId)
   try {
-    setTopicExamGenerationPhase(topicId, jobId, 'Reading topic lecture sources')
-    const usableFiles = topicSourceFiles(topicId)
+    setTopicExamGenerationPhase(topicId, jobId, 'Reading topic sources')
     const failedFiles = topicFailedSourceFiles(topicId)
+    fs.mkdirSync(examAssetDir, { recursive: true })
+    const sourceManifest = prepareTopicExamSourceManifest(topicId, examAssetDir)
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
-    if (usableFiles.length === 0) {
+    if (!sourceManifest) {
       throw new Error([
-        'No usable extracted lecture text exists for this topic.',
+        'No readable source files exist for this topic.',
         ...failedFiles.map((file) => `${file.name}: ${file.error}`),
       ].filter(Boolean).join('\n'))
     }
 
-    fs.mkdirSync(examAssetDir, { recursive: true })
     const baseBank = topicQuestionBank(topicId)
     const promptContext = createExamGenerationPromptContext(baseBank)
+    const draftOutputPath = path.join(examAssetDir, 'draft-question-set.json')
+    const finalOutputPath = path.join(examAssetDir, 'final-question-set.json')
     setTopicExamGenerationPhase(topicId, jobId, 'Generating draft exam')
-    const draftMarkdown = await generateExamDraftWithCodex(jobId, {
+    await generateExamDraftWithCodex(jobId, {
       topicId,
       examId,
       examAssetDir,
-      usableFiles,
+      outputPath: draftOutputPath,
+      sourceManifest,
       failedFiles,
       promptContext,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
-    const draftSet = extractGeneratedQuestionSet(draftMarkdown)
+    const draftSet = readGeneratedQuestionSetFile(draftOutputPath)
     setTopicExamGenerationPhase(topicId, jobId, 'Reviewing and repairing draft exam')
-    const finalMarkdown = await reviewAndRepairGeneratedExamWithCodex(jobId, {
+    await reviewAndRepairGeneratedExamWithCodex(jobId, {
       topicId,
       examId,
       examAssetDir,
-      usableFiles,
+      outputPath: finalOutputPath,
+      draftPath: draftOutputPath,
+      sourceManifest,
       failedFiles,
       promptContext,
       draftSet,
@@ -2386,7 +2776,7 @@ async function generatePersistentExamForTopic(topicId, jobId) {
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
     setTopicExamGenerationPhase(topicId, jobId, 'Validating reviewed exam')
-    const rawSet = extractGeneratedQuestionSet(finalMarkdown)
+    const rawSet = readGeneratedQuestionSetFile(finalOutputPath)
     const normalizedSet = normalizeGeneratedQuestionSet(rawSet, examId, topicId)
     validateGeneratedExamAssets(normalizedSet, examId, topicId)
     persistGeneratedExamSetForTopic(topicId, normalizedSet)
@@ -2413,7 +2803,17 @@ async function generatePersistentExamForTopic(topicId, jobId) {
   }
 }
 
-async function generateExamDraftWithCodex(jobId, { topicId = null, examId, examAssetDir, usableFiles, failedFiles, promptContext }) {
+async function generateExamDraftWithCodex(jobId, {
+  topicId = null,
+  examId,
+  examAssetDir,
+  outputPath = null,
+  sourceManifest = null,
+  usableFiles,
+  failedFiles,
+  promptContext,
+  codeExampleFiles = [],
+}) {
   return runExamCodexTurn(jobId, {
     topicId,
     phaseLabel: 'Draft',
@@ -2422,20 +2822,35 @@ You generate high-quality TurboLearner exam question set drafts from course lect
 For image-based questions, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available.
 Built-in image generation saves images under $CODEX_HOME/generated_images by default; copy the selected PNG/JPEG into the requested exam asset directory before returning JSON.
 You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
-Return the draft question set JSON in one fenced json block after any work is complete.
+When an output path is provided, write the draft question set JSON to that file yourself. Keep the final chat response brief.
 `.trim(),
     prompt: buildExamDraftGenerationPrompt({
       topicId,
       examId,
       examAssetDir,
+      outputPath,
+      sourceManifest,
       usableFiles,
       failedFiles,
       promptContext,
+      codeExampleFiles,
     }),
   })
 }
 
-async function reviewAndRepairGeneratedExamWithCodex(jobId, { topicId = null, examId, examAssetDir, usableFiles, failedFiles, promptContext, draftSet }) {
+async function reviewAndRepairGeneratedExamWithCodex(jobId, {
+  topicId = null,
+  examId,
+  examAssetDir,
+  outputPath = null,
+  draftPath = null,
+  sourceManifest = null,
+  usableFiles,
+  failedFiles,
+  promptContext,
+  codeExampleFiles = [],
+  draftSet,
+}) {
   return runExamCodexTurn(jobId, {
     topicId,
     phaseLabel: 'Review',
@@ -2445,15 +2860,19 @@ Review the draft against lecture material, real-exam style examples, and all pri
 Rewrite, replace, and repair the draft directly. Do not merely critique it.
 For any new image-based replacement question, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available, then copy the selected PNG/JPEG into the requested exam asset directory.
 You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
-Return only the corrected final question set JSON in one fenced json block after any work is complete.
+When an output path is provided, write the corrected final question set JSON to that file yourself. Keep the final chat response brief.
 `.trim(),
     prompt: buildExamReviewPrompt({
       topicId,
       examId,
       examAssetDir,
+      outputPath,
+      draftPath,
+      sourceManifest,
       usableFiles,
       failedFiles,
       promptContext,
+      codeExampleFiles,
       draftSet,
     }),
   })
@@ -2504,9 +2923,7 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
     },
   })
 
-  const finalMarkdown = markdown.trim()
-  if (!finalMarkdown) throw new Error(`${phaseLabel} Codex thread generated an empty exam response.`)
-  return finalMarkdown
+  return markdown.trim()
 }
 
 function isExamJobCurrent(topicId, jobId) {
@@ -2542,6 +2959,19 @@ function extractGeneratedQuestionSet(markdown) {
     return parsed
   } catch (error) {
     throw new Error(`Generated exam JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function readGeneratedQuestionSetFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Codex did not write the expected exam JSON file: ${filePath}`)
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    if (Array.isArray(parsed?.sets)) return parsed.sets[0]
+    return parsed
+  } catch (error) {
+    throw new Error(`Generated exam JSON file could not be parsed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -2622,6 +3052,9 @@ function normalizeGeneratedAnswer(answer, question, options, type, questionId) {
     : uniqueStrings(rawCorrectIds?.map(String) ?? []).filter((id) => options.some((option) => option.id === id))
   if (type !== 'open' && correctOptionIds.length === 0) {
     throw new Error(`${questionId} is missing a valid answer.correctOptionIds array.`)
+  }
+  if (type !== 'open') {
+    assertGeneratedChoiceAnswerDistribution({ questionId, type, options, correctOptionIds })
   }
 
   return {
@@ -2727,19 +3160,17 @@ function sanitizePathSegment(value) {
 
 async function generatePersistentContext(jobId, files) {
   try {
-    const extractedFiles = await Promise.all(files.map(extractContextFile))
+    const sourceManifest = prepareLegacyContextSourceManifest(files)
     if (jobId !== contextJobId) return
 
-    const usableFiles = extractedFiles.filter((file) => file.text.trim())
-    const failedFiles = extractedFiles.filter((file) => file.error)
-    if (usableFiles.length === 0) {
-      throw new Error([
-        'No usable text could be extracted from the selected files.',
-        ...failedFiles.map((file) => `${file.name}: ${file.error}`),
-      ].filter(Boolean).join('\n'))
-    }
+    if (!sourceManifest) throw new Error('No readable PDF, TXT, or MD files were uploaded for context generation.')
 
-    const injectedPrompt = await summarizeCourseContextWithCodex(usableFiles, failedFiles)
+    const outputPath = path.join(contextDir, 'context-summary.json')
+    const injectedPrompt = await summarizeCourseContextWithCodex({
+      sourceManifest,
+      failedFiles: [],
+      outputPath,
+    })
     if (jobId !== contextJobId) return
 
     contextState = {
@@ -2748,9 +3179,7 @@ async function generatePersistentContext(jobId, files) {
       files: files.map(({ originalName, size, extension }) => ({ name: originalName, size, extension })),
       generatedAt: new Date().toISOString(),
       injectedPrompt,
-      error: failedFiles.length > 0
-        ? `Skipped ${failedFiles.length} file${failedFiles.length === 1 ? '' : 's'} with extraction errors.`
-        : null,
+      error: null,
     }
     persistContextState()
     tutorThreads.clear()
@@ -2765,73 +3194,44 @@ async function generatePersistentContext(jobId, files) {
   }
 }
 
+function prepareLegacyContextSourceManifest(files) {
+  const contextFiles = files.filter((file) => isTopicContextSource({
+    extension: file.extension,
+    sourceKind: 'lecture',
+  })).filter((file) => file.path && fs.existsSync(file.path))
+  if (contextFiles.length === 0) return null
+
+  return {
+    root: contextUploadsDir,
+    outputFormat: {
+      injectedPrompt: 'string containing the Course Scope Markdown to inject into tutor developer instructions',
+    },
+    files: contextFiles.map((file) => ({
+      name: file.originalName,
+      relativePath: file.originalName,
+      path: file.path,
+      extension: file.extension,
+      size: Number(file.size) || 0,
+    })),
+  }
+}
+
 async function extractContextFile(file) {
-  if (!acceptedContextExtensions.has(file.extension)) {
-    return {
-      name: file.originalName,
-      text: '',
-      error: `Unsupported file type "${file.extension || '(none)'}".`,
-    }
-  }
-
-  try {
-    const text = file.extension === '.pdf'
-      ? await extractPdfText(file.path)
-      : await fs.promises.readFile(file.path, 'utf8')
-    return {
-      name: file.originalName,
-      text: text.trim(),
-      error: text.trim() ? null : 'No text was extracted.',
-    }
-  } catch (error) {
-    return {
-      name: file.originalName,
-      text: '',
-      error: error instanceof Error ? error.message : String(error),
-    }
-  }
+  return extractSourceFile(file, { appRoot })
 }
 
-function extractPdfText(filePath) {
-  return runCommand('pdftotext', ['-layout', filePath, '-'], 60_000)
-}
-
-function runCommand(command, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: appRoot,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-    const timer = setTimeout(() => {
-      child.kill()
-      reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s.`))
-    }, timeoutMs)
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk
-    })
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk
-    })
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
-    })
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolve(stdout)
-      else reject(new Error(stderr.trim() || `${command} exited with status ${code}.`))
-    })
-  })
-}
-
-async function summarizeCourseContextWithCodex(usableFiles, failedFiles) {
+async function summarizeCourseContextWithCodex({
+  sourceManifest = null,
+  failedFiles = [],
+  outputPath = null,
+  usableFiles = [],
+  topicId = null,
+  jobId = null,
+} = {}) {
   const thread = await codex.request('thread/start', {
     cwd: appRoot,
     approvalPolicy: 'never',
-    sandbox: 'read-only',
+    sandbox: outputPath ? 'workspace-write' : 'read-only',
     ephemeral: true,
     developerInstructions: `
 You create compact persistent scope context for TurboLearner.
@@ -2839,31 +3239,89 @@ The output is consumed by another LLM tutor, not by a human.
 The reader already knows every standard machine-learning concept; never explain standard concepts.
 Your job is only to preserve course-specific coverage, expected depth, notation, terminology, and lecture-specific nuances.
 Minimize context-window bloat.
-Do not edit files, run commands, or browse. Use only the lecture text in the prompt.
-Return only the text that should be injected into future tutor developer instructions.
+Do not browse the web or call third-party APIs.
+When source paths are provided, inspect those files yourself with local shell commands. For PDFs, use local tools such as pdftotext when useful.
+When an output path is provided, write JSON to that file yourself with shape {"injectedPrompt":"..."}.
+The injectedPrompt value must contain only the text that should be injected into future tutor developer instructions.
 `.trim(),
   })
+  if (topicId && jobId) {
+    setTopicContextThreadId(topicId, jobId, thread.thread.id)
+    appendTopicContextLog(topicId, jobId, 'status', `Context Codex thread: ${thread.thread.id}`)
+  }
   let markdown = ''
   await codex.startTurn({
     threadId: thread.thread.id,
-    input: [{ type: 'text', text: buildCourseContextSummaryPrompt(usableFiles, failedFiles), text_elements: [] }],
+    input: [{ type: 'text', text: buildCourseContextSummaryPrompt({
+      sourceManifest,
+      usableFiles,
+      failedFiles,
+      outputPath,
+    }), text_elements: [] }],
     cwd: appRoot,
     approvalPolicy: 'never',
-    sandboxPolicy: { type: 'readOnly', networkAccess: false },
+    sandboxPolicy: { type: outputPath ? 'workspaceWrite' : 'readOnly', networkAccess: false },
     timeoutMs: contextGenerationTurnTimeoutMs,
     onNotification: (message) => {
       if (message.method === 'item/agentMessage/delta') {
-        markdown += message.params?.delta ?? ''
+        const delta = message.params?.delta ?? ''
+        markdown += delta
+        if (topicId && jobId) appendTopicContextLog(topicId, jobId, 'assistant', delta)
+      }
+      if (message.method === 'item/started') {
+        if (topicId && jobId) {
+          appendTopicContextLog(
+            topicId,
+            jobId,
+            'tool',
+            summarizeCodexItem(message.params?.item, 'Started'),
+            summarizeCodexItemDetail(message.params?.item),
+          )
+        }
+      }
+      if (message.method === 'item/completed') {
+        if (topicId && jobId) {
+          appendTopicContextLog(
+            topicId,
+            jobId,
+            'tool',
+            summarizeCodexItem(message.params?.item, 'Completed'),
+            summarizeCodexItemDetail(message.params?.item),
+          )
+        }
       }
     },
   })
 
+  if (outputPath) return readCourseContextOutputFile(outputPath)
   const injectedPrompt = markdown.trim()
   if (!injectedPrompt) throw new Error('Codex generated an empty course context.')
   return injectedPrompt
 }
 
-function buildCourseContextSummaryPrompt(usableFiles, failedFiles) {
+function readCourseContextOutputFile(outputPath) {
+  if (!fs.existsSync(outputPath)) {
+    throw new Error(`Codex did not write the expected context JSON file: ${outputPath}`)
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(fs.readFileSync(outputPath, 'utf8'))
+  } catch (error) {
+    throw new Error(`Generated context JSON file could not be parsed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const injectedPrompt = typeof parsed?.injectedPrompt === 'string'
+    ? parsed.injectedPrompt.trim()
+    : ''
+  if (!injectedPrompt) throw new Error('Generated context JSON is missing a non-empty injectedPrompt string.')
+  return injectedPrompt
+}
+
+function buildCourseContextSummaryPrompt({
+  sourceManifest = null,
+  usableFiles = [],
+  failedFiles = [],
+  outputPath = null,
+}) {
   const extractionNotes = failedFiles.length > 0
     ? `
 Extraction notes for this one-time summarizer pass:
@@ -2872,12 +3330,16 @@ ${failedFiles.map((file) => `- ${file.name}: ${file.error}`).join('\n')}
     : 'Extraction notes for this one-time summarizer pass: none.'
 
   return `
-Create a persistent Course Scope document from the selected lecture files.
+Create a persistent Course Scope document from the selected source files.
 
 This output will be injected verbatim into future TurboLearner tutor developer instructions.
 The reader is another LLM-based tutor that already knows every standard machine-learning concept.
 No human student will read this.
 The goal is to minimize injected context-window bloat while preserving course-specific scope.
+
+${outputPath ? `Write the result as JSON to this exact path: ${outputPath}
+JSON shape: {"injectedPrompt":"# Course Scope\\n..."}
+Do not rely on your final chat response for the artifact.` : 'Return only the Course Scope document.'}
 
 Purpose:
 Tell the future tutor exactly what this course covered and at what depth.
@@ -2900,7 +3362,7 @@ Preserve, in priority order:
    - implementation awareness.
 3. Course-specific notation, terminology, naming, and framing.
 4. Professor-specific or slide-specific nuances.
-5. Explicit caveats stated or strongly evidenced by the lecture text.
+5. Explicit caveats stated or strongly evidenced by the source text.
 6. Examples only when they define exam scope or expected answer style.
 
 Drop aggressively:
@@ -2939,16 +3401,19 @@ Use only bullets. Keep each bullet dense and short.
 If a field has nothing course-specific, omit that field.
 Do not include prose paragraphs.
 Do not include a "Not in scope" section.
-Return only the Course Scope document.
+${outputPath ? 'Write only valid JSON to the output file.' : 'Return only the Course Scope document.'}
 
 ${extractionNotes}
 
-Lecture text:
+${sourceManifest ? `Source manifest:
+${JSON.stringify(sourceManifest, null, 2)}
+
+Use these paths directly. Read only what is needed. Do not paste full extracted source text into your final response or JSON beyond the compact Course Scope.` : `Source text:
 ${usableFiles.map((file) => `
 --- BEGIN FILE: ${file.name} ---
 ${file.text}
 --- END FILE: ${file.name} ---
-`).join('\n')}
+`).join('\n')}`}
 `.trim()
 }
 
