@@ -45,6 +45,8 @@
 .menu-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -96,6 +98,20 @@
   color: #475569;
   font-weight: 850;
   text-decoration: none;
+}
+
+.weak-spots-button {
+  border-color: rgba(254, 202, 202, 0.95);
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+.weak-spots-button:hover {
+  background: #fecaca;
+}
+
+.weak-spots-button span {
+  color: #991b1b;
 }
 
 .generate-exam-button.generation-ready {
@@ -716,6 +732,31 @@
   padding-right: 10px;
   scrollbar-color: rgba(255, 255, 255, 0.32) transparent;
   scrollbar-width: thin;
+}
+
+.weak-spots-done-panel {
+  justify-content: flex-start;
+}
+
+.weak-spots-empty {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.weak-spots-empty h2 {
+  color: var(--text-h);
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.weak-spots-empty p {
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .question-scroll::-webkit-scrollbar {

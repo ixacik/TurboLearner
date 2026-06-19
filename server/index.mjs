@@ -47,6 +47,8 @@ const topicsDir = path.join(contextDir, 'topics')
 const defaultTopicId = 'machine-learning'
 const defaultTopicName = 'Machine Learning'
 const defaultTopicEmoji = '🧠'
+const allQuestionsSetId = 'all-questions'
+const weakSpotsSetId = 'weak-spots'
 const examGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_EXAM_GENERATION_TURN_TIMEOUT_MS || 20 * 60 * 1000)
 
 const tutorThreads = new Map()
@@ -1627,18 +1629,24 @@ function topicQuestionBank(topicId) {
 
 function topicQuestionSetIds(topicId) {
   const ids = new Set(db.prepare('SELECT id FROM question_sets WHERE topic_id = ?').all(topicId).map((row) => row.id))
-  if (ids.size > 0) ids.add('all-questions')
+  if (ids.size > 0) {
+    ids.add(allQuestionsSetId)
+    ids.add(weakSpotsSetId)
+  }
   return ids
 }
 
 function getQuestionSet(topicId, setId) {
-  if (setId === 'all-questions') {
+  if (setId === allQuestionsSetId || setId === weakSpotsSetId) {
     const sets = topicQuestionBank(topicId).sets
     const questions = sets.flatMap((set) => set.questions)
+    const isWeakSpots = setId === weakSpotsSetId
     return {
-      id: 'all-questions',
-      title: 'All Questions',
-      description: 'Practice and last year exam questions mixed together.',
+      id: setId,
+      title: isWeakSpots ? 'Weak Spots' : 'All Questions',
+      description: isWeakSpots
+        ? 'Repair missed questions from this topic.'
+        : 'Practice and last year exam questions mixed together.',
       questions,
     }
   }
@@ -1682,7 +1690,9 @@ function persistGeneratedExamSetForTopic(topicId, set) {
 }
 
 function deleteGeneratedQuestionSet(topicId, setId) {
-  if (!setId || setId === 'all-questions') throw new Error('Generated exam not found.')
+  if (!setId || setId === allQuestionsSetId || setId === weakSpotsSetId) {
+    throw new Error('Generated exam not found.')
+  }
   const row = db.prepare(`
     SELECT id, source_type, source_path
     FROM question_sets

@@ -85,7 +85,7 @@ type QuestionSet = {
   id: string
   title: string
   description: string
-  sourceType: 'static' | 'generated'
+  sourceType: 'static' | 'generated' | 'virtual'
   sourcePath?: string
   questions: Question[]
 }
@@ -406,6 +406,10 @@ const activeTopicKey = 'turbolearner.activeTopic.v1'
 const examSessionsKey = 'turbolearner.examSessions.v1'
 const sqliteMigrationKey = 'turbolearner.sqliteMigration.v1'
 const codexSidebarWidthKey = 'turbolearner.codexSidebarWidth.v1'
+const allQuestionsSetId = 'all-questions'
+const weakSpotsSetId = 'weak-spots'
+const retryGapMin = 2
+const retryGapMax = 4
 const defaultCodexSidebarWidth = 480
 const minCodexSidebarWidth = 360
 const maxCodexSidebarWidth = 760
@@ -425,7 +429,6 @@ const emptyCourseContextState: CourseContextState = {
 }
 const emptyProgressRecords: Record<string, ProgressRecord> = {}
 const emptyHistoryItems: HistoryItem[] = []
-const emptyQuestionQueue: string[] = []
 const emptyAnswersByQuestion: Record<string, AnswerPayload> = {}
 const emptyRevealedCorrectOptionIdsByQuestion: Record<string, string[]> = {}
 const emptyTutorMessages: TutorMessage[] = []
@@ -679,7 +682,6 @@ function App() {
   const progress = activeSession?.progress ?? emptyProgressRecords
   const history = activeSession?.history ?? emptyHistoryItems
   const currentId = activeSession?.currentId ?? null
-  const questionQueue = activeSession?.questionQueue ?? emptyQuestionQueue
   const answersByQuestion = activeSession?.answersByQuestion ?? emptyAnswersByQuestion
   const result = activeSession?.result ?? null
   const isAnswerKeyRevealed = activeSession?.isAnswerKeyRevealed ?? false
@@ -715,12 +717,6 @@ function App() {
     }))
   }, [updateActiveSession])
 
-  const setCurrentId = useCallback((value: SetStateAction<string | null>) => {
-    updateActiveSessionField('currentId', value)
-  }, [updateActiveSessionField])
-  const setQuestionQueue = useCallback((value: SetStateAction<string[]>) => {
-    updateActiveSessionField('questionQueue', value)
-  }, [updateActiveSessionField])
   const setAnswersByQuestion = useCallback((value: SetStateAction<Record<string, AnswerPayload>>) => {
     updateActiveSessionField('answersByQuestion', value)
   }, [updateActiveSessionField])
@@ -743,9 +739,6 @@ function App() {
   }, [updateActiveSessionField])
   const setPendingTutorTurn = useCallback((value: SetStateAction<PendingTutorTurn | null>) => {
     updateActiveSessionField('pendingTutorTurn', value)
-  }, [updateActiveSessionField])
-  const setOptionOrderSeed = useCallback((value: SetStateAction<string>) => {
-    updateActiveSessionField('optionOrderSeed', value)
   }, [updateActiveSessionField])
   const setUsedLearningBeforeAnswer = useCallback((value: SetStateAction<boolean>) => {
     updateActiveSessionField('usedLearningBeforeAnswer', value)
@@ -967,25 +960,39 @@ function App() {
   const allSets = useMemo(() => {
     const baseSets = bank?.sets ?? []
     const allQuestions = baseSets.flatMap((set) => set.questions)
-    const combinedSet: QuestionSet | null =
+    const combinedSets: QuestionSet[] =
       allQuestions.length > 0
-        ? {
-            id: 'all-questions',
-            title: 'All Questions',
-            description: 'Practice and last year exam questions mixed together.',
-            sourceType: 'static',
-            questions: allQuestions,
-          }
-        : null
-    return [...baseSets, ...(combinedSet ? [combinedSet] : [])]
+        ? [
+            {
+              id: allQuestionsSetId,
+              title: 'All Questions',
+              description: 'Practice and last year exam questions mixed together.',
+              sourceType: 'virtual',
+              questions: allQuestions,
+            },
+            {
+              id: weakSpotsSetId,
+              title: 'Weak Spots',
+              description: 'Repair missed questions from this topic.',
+              sourceType: 'virtual',
+              questions: allQuestions,
+            },
+          ]
+        : []
+    return [...baseSets, ...combinedSets]
   }, [bank])
 
   const activeSet = allSets.find((set) => set.id === selectedSetId) ?? null
+  const isWeakSpotsMode = selectedSetId === weakSpotsSetId
   const questions = useMemo(() => {
     if (!activeSet) return []
     return activeSet.questions.map((question) => shuffleQuestionOptions(question, optionOrderSeed))
   }, [activeSet, optionOrderSeed])
   const units = useMemo(() => buildQuestionUnits(questions), [questions])
+  const weakSpotUnits = useMemo(
+    () => isWeakSpotsMode ? getWeakSpotUnits(units, examSessions) : [],
+    [examSessions, isWeakSpotsMode, units],
+  )
   const currentUnit = units.find((unit) => unit.id === currentId) ?? null
 
   const last25 = useMemo(() => history.slice(0, 25), [history])
@@ -1020,10 +1027,17 @@ function App() {
     const nextUnits = buildQuestionUnits(nextSet.questions)
     setExamSessions((sessions) => {
       const existingSession = sessions[selectedSetId]
-      if (isExamSessionValid(existingSession, nextUnits)) return sessions
+      if (isExamSessionValidForSet(existingSession, nextUnits, selectedSetId, sessions)) return sessions
+      const nextDeck = buildInitialQuestionDeckForSet(selectedSetId, nextUnits, sessions)
+      const nextQuestionState = {
+        currentId: nextDeck.currentId,
+        questionQueue: nextDeck.queue,
+      }
       return {
         ...sessions,
-        [selectedSetId]: createExamSession(buildInitialQuestionDeck(nextUnits)),
+        [selectedSetId]: selectedSetId === weakSpotsSetId && existingSession
+          ? resetExamSessionQuestionState(existingSession, nextQuestionState)
+          : createExamSession(nextDeck),
       }
     })
     setCodexStatus('')
@@ -1116,52 +1130,49 @@ function App() {
 
   const resetQuestionState = useCallback(() => {
     followCodexStream()
-    setAnswersByQuestion({})
-    setResult(null)
-    setIsAnswerKeyRevealed(false)
-    setRevealedCorrectOptionIdsByQuestion({})
-    setMessages([])
     setCodexStatus('')
     clearStreamingTutorMessage()
     setStreamingMessageKind(null)
-    setTutorSessionId(crypto.randomUUID())
-    setPendingTutorTurn(null)
-    setOptionOrderSeed(crypto.randomUUID())
-    setUsedLearningBeforeAnswer(false)
     setError(null)
   }, [
     followCodexStream,
     clearStreamingTutorMessage,
-    setAnswersByQuestion,
-    setIsAnswerKeyRevealed,
-    setRevealedCorrectOptionIdsByQuestion,
-    setMessages,
-    setOptionOrderSeed,
-    setPendingTutorTurn,
-    setResult,
-    setTutorSessionId,
-    setUsedLearningBeforeAnswer,
   ])
 
   const showNextQuestion = useCallback((requeueCurrent = false) => {
-    const next = getNextQuestionFromQueue(
-      units.map((unit) => unit.id),
-      currentUnit?.id ?? currentId,
-      questionQueue,
-      requeueCurrent,
-    )
-    if (!next) return
+    if (!selectedSetId) return
+    setExamSessions((sessions) => {
+      const session = sessions[selectedSetId]
+      if (!session) return sessions
 
-    setCurrentId(next.currentId)
-    setQuestionQueue(next.queue)
+      const selectableUnits = selectedSetId === weakSpotsSetId
+        ? getWeakSpotUnits(units, sessions)
+        : units
+      const next = getNextQuestionFromQueue(
+        units.map((unit) => unit.id),
+        session.currentId,
+        session.questionQueue,
+        requeueCurrent,
+        {
+          selectableUnitIds: selectableUnits.map((unit) => unit.id),
+          emptyBehavior: selectedSetId === weakSpotsSetId ? 'empty' : 'reshuffle',
+        },
+      )
+      if (!next) return sessions
+
+      return {
+        ...sessions,
+        [selectedSetId]: resetExamSessionQuestionState(session, {
+          currentId: next.currentId,
+          questionQueue: next.queue,
+        }),
+      }
+    })
     resetQuestionState()
   }, [
-    currentId,
-    currentUnit,
-    questionQueue,
     resetQuestionState,
-    setCurrentId,
-    setQuestionQueue,
+    selectedSetId,
+    setExamSessions,
     units,
   ])
 
@@ -1170,8 +1181,8 @@ function App() {
   }, [result, showNextQuestion])
 
   const handleSkipQuestion = useCallback(() => {
-    showNextQuestion()
-  }, [showNextQuestion])
+    showNextQuestion(isWeakSpotsMode)
+  }, [isWeakSpotsMode, showNextQuestion])
 
   const toggleOption = useCallback((question: Question, optionId: string) => {
     if (result) return
@@ -1211,11 +1222,11 @@ function App() {
         [selectedSetId]: applyAnsweredUnitToSession(activeSession, unit, tutorResponse.isCorrect, now),
       }
 
-      if (selectedSetId !== 'all-questions') return nextSessions
+      if (!isAggregateQuestionSetId(selectedSetId)) return nextSessions
 
       for (const [sourceSetId, sourceUnit] of sourceQuestionUnitsBySet(unit)) {
         if (sourceSetId === selectedSetId) continue
-        const sourceSet = allSets.find((set) => set.id === sourceSetId && set.id !== 'all-questions')
+        const sourceSet = allSets.find((set) => set.id === sourceSetId && !isVirtualQuestionSetId(set.id))
         if (!sourceSet) continue
 
         const sourceSession =
@@ -1729,7 +1740,9 @@ function App() {
     )
   }
 
-  if (!activeSet || !currentUnit) {
+  const showWeakSpotsDone = isWeakSpotsMode && !currentUnit && weakSpotUnits.length === 0
+
+  if (!activeSet || (!currentUnit && !showWeakSpotsDone)) {
     return (
       <main className="app-shell">
         <ExamMenu
@@ -1775,27 +1788,31 @@ function App() {
       className={`app-shell ${isResizingSidebar ? 'resizing-sidebar' : ''}`}
       style={appShellStyle}
     >
-      <TrainerPanel
-        title={activeSet.title}
-        currentUnit={currentUnit}
-        answersByQuestion={answersByQuestion}
-        canSubmitAnswer={canSubmitAnswer}
-        correctLast25={correctLast25}
-        error={error}
-        isAnswerKeyRevealed={isAnswerKeyRevealed}
-        isGrading={isGrading}
-        last25={last25}
-        onExplainConcept={explainConceptBeforeAnswering}
-        onNextAfterResult={handleNextQuestionAfterResult}
-        onOpenAnswerChange={updateOpenAnswer}
-        menuHref={`/topics/${encodeURIComponent(activeTopic.id)}`}
-        onSkipQuestion={handleSkipQuestion}
-        onSubmitAnswer={submitAnswer}
-        onToggleOption={toggleOption}
-        result={result}
-        revealedCorrectOptionIdsByQuestion={revealedCorrectOptionIdsByQuestion}
-        seenQuestionCount={seenQuestionCount}
-      />
+      {showWeakSpotsDone ? (
+        <WeakSpotsDonePanel menuHref={`/topics/${encodeURIComponent(activeTopic.id)}`} />
+      ) : currentUnit && (
+        <TrainerPanel
+          title={activeSet.title}
+          currentUnit={currentUnit}
+          answersByQuestion={answersByQuestion}
+          canSubmitAnswer={canSubmitAnswer}
+          correctLast25={correctLast25}
+          error={error}
+          isAnswerKeyRevealed={isAnswerKeyRevealed}
+          isGrading={isGrading}
+          last25={last25}
+          onExplainConcept={explainConceptBeforeAnswering}
+          onNextAfterResult={handleNextQuestionAfterResult}
+          onOpenAnswerChange={updateOpenAnswer}
+          menuHref={`/topics/${encodeURIComponent(activeTopic.id)}`}
+          onSkipQuestion={handleSkipQuestion}
+          onSubmitAnswer={submitAnswer}
+          onToggleOption={toggleOption}
+          result={result}
+          revealedCorrectOptionIdsByQuestion={revealedCorrectOptionIdsByQuestion}
+          seenQuestionCount={seenQuestionCount}
+        />
+      )}
 
       <div
         className="sidebar-resizer"
@@ -2013,6 +2030,31 @@ const TrainerPanel = memo(function TrainerPanel({
       </div>
 
       {error && <div className="error-box">{error}</div>}
+    </section>
+  )
+})
+
+const WeakSpotsDonePanel = memo(function WeakSpotsDonePanel({
+  menuHref,
+}: {
+  menuHref: string
+}) {
+  return (
+    <section className="trainer-panel weak-spots-done-panel">
+      <header className="study-header">
+        <div className="study-title">
+          <Link className="ghost-button" to={menuHref}>
+            Menu
+          </Link>
+          <div>
+            <h1>Weak Spots</h1>
+          </div>
+        </div>
+      </header>
+      <div className="weak-spots-empty">
+        <h2>All Done!</h2>
+        <p>No missed questions left.</p>
+      </div>
     </section>
   )
 })
@@ -3062,8 +3104,12 @@ function ExamMenu({
   const [isDeletingExam, setIsDeletingExam] = useState(false)
   const [deleteExamError, setDeleteExamError] = useState<string | null>(null)
   const isBusy = examGeneration.status === 'processing'
-  const allQuestionsSet = sets.find((set) => set.id === 'all-questions') ?? null
-  const examSets = sets.filter((set) => set.id !== 'all-questions')
+  const allQuestionsSet = sets.find((set) => set.id === allQuestionsSetId) ?? null
+  const weakSpotsSet = sets.find((set) => set.id === weakSpotsSetId) ?? null
+  const weakSpotCount = weakSpotsSet
+    ? getWeakSpotUnits(buildQuestionUnits(weakSpotsSet.questions), examSessions).length
+    : 0
+  const examSets = sets.filter((set) => !isVirtualQuestionSetId(set.id))
 
   const closeDeleteModal = useCallback(() => {
     if (isDeletingExam) return
@@ -3249,6 +3295,15 @@ function ExamMenu({
               >
                 All Questions
                 <span>{allQuestionsSet.questions.length}</span>
+              </Link>
+            )}
+            {weakSpotsSet && (
+              <Link
+                className="all-questions-button weak-spots-button"
+                to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(weakSpotsSet.id)}`}
+              >
+                Weak Spots
+                <span>{weakSpotCount}</span>
               </Link>
             )}
           </div>
@@ -4160,6 +4215,14 @@ function isUnitAnswered(unit: QuestionUnit, answersByQuestion: Record<string, An
   })
 }
 
+function isVirtualQuestionSetId(setId: string) {
+  return setId === allQuestionsSetId || setId === weakSpotsSetId
+}
+
+function isAggregateQuestionSetId(setId: string | null) {
+  return setId === allQuestionsSetId || setId === weakSpotsSetId
+}
+
 function createExamSession(deck: { currentId: string | null; queue: string[] }): ExamSession {
   return {
     currentId: deck.currentId,
@@ -4245,6 +4308,23 @@ function sourceQuestionUnitsBySet(unit: QuestionUnit) {
   )
 }
 
+function getWeakSpotUnits(units: QuestionUnit[], sessions: Record<string, ExamSession>) {
+  return units.filter((unit) =>
+    unit.questions.some((question) => isUnresolvedMiss(getQuestionProgress(question, sessions)))
+  )
+}
+
+function getQuestionProgress(question: Question, sessions: Record<string, ExamSession>) {
+  return sessions[question.setId]?.progress?.[question.id] ??
+    sessions[allQuestionsSetId]?.progress?.[question.id] ??
+    sessions[weakSpotsSetId]?.progress?.[question.id] ??
+    null
+}
+
+function isUnresolvedMiss(record: ProgressRecord | null | undefined) {
+  return Boolean(record && record.wrong > 0 && record.streak === 0)
+}
+
 function prepareExamSessionsForStorage(sessions: Record<string, ExamSession>): Record<string, ExamSession> {
   return Object.fromEntries(
     Object.entries(sessions).map(([setId, session]) => [
@@ -4263,8 +4343,37 @@ function isExamSessionValid(session: ExamSession | undefined, units: QuestionUni
   return unitIds.has(session.currentId) && session.questionQueue.every((id) => unitIds.has(id))
 }
 
+function isExamSessionValidForSet(
+  session: ExamSession | undefined,
+  units: QuestionUnit[],
+  setId: string,
+  sessions: Record<string, ExamSession>,
+) {
+  if (setId !== weakSpotsSetId) return isExamSessionValid(session, units)
+  if (!session) return false
+
+  const unitIds = new Set(units.map((unit) => unit.id))
+  if (!session.questionQueue.every((id) => unitIds.has(id))) return false
+
+  const weakUnits = getWeakSpotUnits(units, sessions)
+  if (!session.currentId) return weakUnits.length === 0
+  if (!unitIds.has(session.currentId)) return false
+  if (session.result) return true
+
+  return weakUnits.some((unit) => unit.id === session.currentId)
+}
+
 function buildInitialQuestionDeck(units: QuestionUnit[]) {
   return buildInitialQuestionDeckFromIds(units.map((unit) => unit.id))
+}
+
+function buildInitialQuestionDeckForSet(
+  setId: string,
+  units: QuestionUnit[],
+  sessions: Record<string, ExamSession>,
+) {
+  if (setId === weakSpotsSetId) return buildInitialQuestionDeck(getWeakSpotUnits(units, sessions))
+  return buildInitialQuestionDeck(units)
 }
 
 function buildInitialQuestionDeckFromIds(unitIds: string[]) {
@@ -4277,22 +4386,44 @@ function getNextQuestionFromQueue(
   currentId: string | null,
   queue: string[],
   requeueCurrent: boolean,
+  options: {
+    selectableUnitIds?: string[]
+    emptyBehavior?: 'reshuffle' | 'empty'
+  } = {},
 ) {
   if (unitIds.length === 0) return null
 
   const unitIdSet = new Set(unitIds)
-  const remainingQueue = queue.filter((id) => id !== currentId && unitIdSet.has(id))
-  const nextQueue =
-    requeueCurrent && currentId && unitIdSet.has(currentId)
-      ? [...remainingQueue, currentId]
-      : remainingQueue
+  const selectableUnitIds = options.selectableUnitIds ?? unitIds
+  const selectableUnitIdSet = new Set(selectableUnitIds.filter((id) => unitIdSet.has(id)))
+  const remainingQueue = queue.filter((id) =>
+    id !== currentId && unitIdSet.has(id) && selectableUnitIdSet.has(id)
+  )
+  const nextQueue = requeueCurrent && currentId && unitIdSet.has(currentId) && selectableUnitIdSet.has(currentId)
+    ? insertRetryIntoQueue(remainingQueue, currentId)
+    : remainingQueue
 
   if (nextQueue.length > 0) {
     const [nextId, ...rest] = nextQueue
     return { currentId: nextId, queue: rest }
   }
 
+  if (options.emptyBehavior === 'empty') return { currentId: null, queue: [] }
   return buildInitialQuestionDeckFromIds(unitIds)
+}
+
+function insertRetryIntoQueue(queue: string[], id: string) {
+  const gap = randomInteger(retryGapMin, retryGapMax)
+  const insertIndex = Math.min(queue.length, gap)
+  return [
+    ...queue.slice(0, insertIndex),
+    id,
+    ...queue.slice(insertIndex),
+  ]
+}
+
+function randomInteger(min: number, max: number) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
 function shuffleQuestionIds(ids: string[]) {
