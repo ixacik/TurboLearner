@@ -49,6 +49,7 @@ const defaultTopicEmoji = '🧠'
 const examGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_EXAM_GENERATION_TURN_TIMEOUT_MS || 20 * 60 * 1000)
 
 const tutorThreads = new Map()
+const tutorTurns = new Map()
 const db = initializeDatabase()
 const topicContextJobs = new Map()
 const topicExamGenerationJobs = new Map()
@@ -506,6 +507,27 @@ app.post('/api/explain', (req, res) => {
   })
 })
 
+app.get('/api/topics/:topicId/tutor-turns/:sessionId/latest', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const sessionId = String(req.params.sessionId || '')
+    if (!sessionId) {
+      res.status(400).json({ error: 'Missing tutor session id.' })
+      return
+    }
+
+    const turn = tutorTurns.get(tutorTurnKey(topicId, sessionId))
+    if (!turn) {
+      res.status(404).json({ error: 'No tutor turn found.' })
+      return
+    }
+
+    res.json(publicTutorTurn(turn))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
 app.listen(port, () => {
   codex = new CodexAppServer()
   const cleanupInterval = setInterval(cleanupExpiredTutorThreads, tutorThreadCleanupIntervalMs)
@@ -525,6 +547,8 @@ async function streamTutorTurn(payload, res) {
   const topicId = safeTopicId(payload.topicId) ?? defaultTopicId
   const sessionId = String(payload.sessionId || payload.question?.id || 'default')
   const tutorThreadKey = `${topicId}:${sessionId}`
+  const turnKey = tutorTurnKey(topicId, sessionId)
+  const requestId = String(payload.requestId || randomUUID())
   const isFollowUp = payload.mode === 'chat'
   const isLearningRequest = payload.mode === 'learn'
   const threadId = await getTutorThread(tutorThreadKey, topicId)
@@ -537,6 +561,20 @@ async function streamTutorTurn(payload, res) {
   let markdown = ''
   let grade = null
   let answerKey = null
+  const turnState = {
+    requestId,
+    topicId,
+    sessionId,
+    status: 'active',
+    kind: payload.turnKind || (payload.mode === 'submit' ? 'submit' : 'chat'),
+    phase: payload.phase || null,
+    questionUnitId: payload.question?.id || null,
+    markdown: '',
+    response: null,
+    error: null,
+    updatedAt: Date.now(),
+  }
+  tutorTurns.set(turnKey, turnState)
   const gradeFilter = createGradeCallFilter((nextGrade) => {
     grade = nextGrade
   }, (nextAnswerKey) => {
@@ -550,46 +588,60 @@ async function streamTutorTurn(payload, res) {
     settled = true
   })
 
-  await codex.startTurn({
-    threadId,
-    input,
-    cwd: appRoot,
-    approvalPolicy: 'never',
-    sandboxPolicy: { type: 'readOnly', networkAccess: false },
-    onNotification: (message) => {
-      if (settled) return
-
-      if (message.method === 'turn/started') {
-        writeEvent(res, { type: 'status', message: 'Codex is thinking...' })
-        return
-      }
-
-      if (message.method === 'item/agentMessage/delta') {
-        const delta = message.params?.delta ?? ''
-        const visibleDelta = gradeFilter.push(delta)
-        if (visibleDelta) {
-          markdown += visibleDelta
-          writeEvent(res, { type: 'delta', delta: visibleDelta })
+  try {
+    await codex.startTurn({
+      threadId,
+      input,
+      cwd: appRoot,
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      onNotification: (message) => {
+        if (message.method === 'turn/started') {
+          turnState.updatedAt = Date.now()
+          if (!settled) writeEvent(res, { type: 'status', message: 'Codex is thinking...' })
+          return
         }
-        return
-      }
 
-      if (message.method === 'item/completed' && message.params?.item?.type === 'agentMessage') {
-        return
-      }
-    },
-  })
+        if (message.method === 'item/agentMessage/delta') {
+          const delta = message.params?.delta ?? ''
+          const visibleDelta = gradeFilter.push(delta)
+          if (visibleDelta) {
+            markdown += visibleDelta
+            turnState.markdown = markdown
+            turnState.updatedAt = Date.now()
+            if (!settled) writeEvent(res, { type: 'delta', delta: visibleDelta })
+          }
+          return
+        }
 
-  if (settled) return
+        if (message.method === 'item/completed' && message.params?.item?.type === 'agentMessage') {
+          return
+        }
+      },
+    })
+  } catch (error) {
+    turnState.status = 'error'
+    turnState.error = error instanceof Error ? error.message : String(error)
+    turnState.updatedAt = Date.now()
+    throw error
+  }
+
   const finalDelta = gradeFilter.flush()
   if (finalDelta) {
     markdown += finalDelta
-    writeEvent(res, { type: 'delta', delta: finalDelta })
+    turnState.markdown = markdown
+    turnState.updatedAt = Date.now()
+    if (!settled) writeEvent(res, { type: 'delta', delta: finalDelta })
   }
   const response = tutorResponseFromMarkdown(payload, markdown, grade, answerKey)
-  writeEvent(res, { type: 'final', response })
-  writeEvent(res, { type: 'done' })
-  res.end()
+  turnState.status = 'completed'
+  turnState.response = response
+  turnState.updatedAt = Date.now()
+  if (!settled) {
+    writeEvent(res, { type: 'final', response })
+    writeEvent(res, { type: 'done' })
+    res.end()
+  }
 }
 
 function buildCodexInput(prompt, payload) {
@@ -714,6 +766,29 @@ function cleanupExpiredTutorThreads() {
     if (now - record.lastUsedAt > tutorThreadTtlMs) {
       tutorThreads.delete(sessionId)
     }
+  }
+  for (const [key, turn] of tutorTurns) {
+    if (now - turn.updatedAt > tutorThreadTtlMs) {
+      tutorTurns.delete(key)
+    }
+  }
+}
+
+function tutorTurnKey(topicId, sessionId) {
+  return `${topicId}:${sessionId}`
+}
+
+function publicTutorTurn(turn) {
+  return {
+    requestId: turn.requestId,
+    status: turn.status,
+    kind: turn.kind,
+    phase: turn.phase,
+    questionUnitId: turn.questionUnitId,
+    markdown: turn.markdown,
+    response: turn.response,
+    error: turn.error,
+    updatedAt: turn.updatedAt,
   }
 }
 
@@ -2317,12 +2392,33 @@ function sanitizeExamSessionForSet(topicId, setId, session) {
     revealedCorrectOptionIdsByQuestion: filterObjectByKeys(session.revealedCorrectOptionIdsByQuestion, questionIds),
     messages: Array.isArray(session.messages) ? session.messages.filter((message) => message && typeof message === 'object') : [],
     tutorSessionId: typeof session.tutorSessionId === 'string' && session.tutorSessionId.trim() ? session.tutorSessionId : randomUUID(),
+    pendingTutorTurn: sanitizePendingTutorTurn(session.pendingTutorTurn, unitIds),
     optionOrderSeed: typeof session.optionOrderSeed === 'string' && session.optionOrderSeed.trim() ? session.optionOrderSeed : randomUUID(),
     usedLearningBeforeAnswer: Boolean(session.usedLearningBeforeAnswer),
     progress: filterObjectByKeys(session.progress, questionIds),
     history: Array.isArray(session.history)
       ? session.history.filter((item) => item && typeof item === 'object' && typeof item.questionId === 'string')
       : [],
+  }
+}
+
+function sanitizePendingTutorTurn(turn, unitIds) {
+  if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return null
+  if (typeof turn.requestId !== 'string' || !turn.requestId.trim()) return null
+  if (!['submit', 'chat', 'learning'].includes(turn.kind)) return null
+  if (typeof turn.questionUnitId !== 'string' || !unitIds.has(turn.questionUnitId)) return null
+  return {
+    requestId: turn.requestId,
+    kind: turn.kind,
+    questionUnitId: turn.questionUnitId,
+    baseMessages: Array.isArray(turn.baseMessages)
+      ? turn.baseMessages.filter((message) => message && typeof message === 'object')
+      : [],
+    nextMessages: Array.isArray(turn.nextMessages)
+      ? turn.nextMessages.filter((message) => message && typeof message === 'object')
+      : [],
+    usedLearningBeforeAnswer: Boolean(turn.usedLearningBeforeAnswer),
+    startedAt: Number.isFinite(turn.startedAt) ? turn.startedAt : Date.now(),
   }
 }
 
