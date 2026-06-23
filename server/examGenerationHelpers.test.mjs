@@ -8,6 +8,7 @@ import {
   assertGeneratedMultiSelectAnswerVariety,
   buildExamDraftGenerationPrompt,
   buildExamReviewPrompt,
+  buildGeneratedExamProgrammaticFeedback,
   createExamGenerationPromptContext,
 } from './examGenerationHelpers.mjs'
 import {
@@ -105,6 +106,10 @@ test('draft and review prompts distinguish style examples from coverage history'
       sourcePath: '',
       questions: [question({ id: 'generated-test-q1', prompt: 'Draft question.' })],
     },
+    programmaticFeedback: [
+      'Blocking issues detected (1):',
+      '- Generated multi-select answer counts are too predictable: 4/4 use 3/4 correct options.',
+    ].join('\n'),
   })
 
   assert.match(draftPrompt, /Real exam style examples:/)
@@ -126,6 +131,9 @@ test('draft and review prompts distinguish style examples from coverage history'
   assert.match(draftPrompt, /Do not ask what happened in the lecture/)
   assert.match(draftPrompt, /Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level/)
   assert.match(reviewPrompt, /Review and repair this draft TurboLearner exam/)
+  assert.match(reviewPrompt, /Programmatic draft audit:/)
+  assert.match(reviewPrompt, /Generated multi-select answer counts are too predictable: 4\/4 use 3\/4 correct options/)
+  assert.match(reviewPrompt, /These checks run again after review/)
   assert.match(reviewPrompt, /Draft exam JSON:/)
   assert.match(reviewPrompt, /Read the draft JSON from: \/tmp\/generated-test\/draft-question-set\.json/)
   assert.match(reviewPrompt, /Save the corrected JSON file here: \/tmp\/generated-test\/final-question-set\.json/)
@@ -321,6 +329,30 @@ test('multi-select set validation rejects predictable answer-count patterns', ()
     },
   }))
   assert.doesNotThrow(() => assertGeneratedMultiSelectAnswerVariety(varied))
+})
+
+test('programmatic draft audit reports predictable multi-select patterns', () => {
+  const repeated = Array.from({ length: 4 }, (_, index) => question({
+    id: `generated-q${index + 1}`,
+    number: String(index + 1),
+    type: 'multiple',
+    options: [
+      { id: 'A', text: 'A' },
+      { id: 'B', text: 'B' },
+      { id: 'C', text: 'C' },
+      { id: 'D', text: 'D' },
+    ],
+    answer: { correctOptionIds: ['A', 'B', 'C'], expectedText: null, source: 'inferred' },
+  }))
+
+  const feedback = buildGeneratedExamProgrammaticFeedback({ questions: repeated })
+
+  assert.equal(feedback.hasIssues, true)
+  assert.equal(feedback.issues.some((issue) => issue.code === 'predictable-multi-select-answer-counts'), true)
+  assert.match(feedback.text, /Blocking issues detected/)
+  assert.match(feedback.text, /4\/4 use 3\/4 correct options/)
+  assert.match(feedback.text, /generated-q1/)
+  assert.match(feedback.text, /Multi-select answer-count distribution: 3\/4: 4/)
 })
 
 function question(overrides = {}) {

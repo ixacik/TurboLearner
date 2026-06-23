@@ -10,6 +10,7 @@
     "generate:assets": "node scripts/generateQuestionAssets.mjs",
     "import:questions": "node scripts/importQuestions.mjs",
     "audit:questions": "node scripts/auditQuestionBank.mjs",
+    "cleanup:codex": "node scripts/cleanupCodexDesktopProcesses.mjs",
     "test": "node --test server/*.test.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",

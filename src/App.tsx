@@ -43,7 +43,7 @@ import {
   X,
 } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
-import { Link, useLoaderData, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useLoaderData, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import type { LoaderFunctionArgs } from 'react-router'
 import 'katex/dist/katex.min.css'
 import './App.css'
@@ -639,11 +639,13 @@ export async function topicLoader({ params }: LoaderFunctionArgs): Promise<AppLo
 
 function App() {
   const loaderData = useLoaderData() as AppLoaderData
+  const location = useLocation()
   const navigate = useNavigate()
   const routeParams = useParams<{ topicId?: string; setId?: string }>()
   const [searchParams] = useSearchParams()
   const selectedTopicId = routeParams.topicId ?? null
   const selectedSetId = routeParams.setId ?? null
+  const isAnswerKeyRoute = location.pathname.replace(/\/+$/, '').endsWith('/answers')
   const [topics, setTopics] = useState<Topic[]>(loaderData.topics)
   const [loadedTopicId, setLoadedTopicId] = useState<string | null>(loaderData.topicState?.topicId ?? null)
   const [bank, setBank] = useState<QuestionBank | null>(loaderData.topicState?.bank ?? null)
@@ -1018,6 +1020,7 @@ function App() {
 
   useLayoutEffect(() => {
     if (!selectedSetId || loadedTopicId !== selectedTopicId) return
+    if (isAnswerKeyRoute) return
     const nextSet = allSets.find((set) => set.id === selectedSetId)
     if (!nextSet) {
       if (selectedTopicId) navigate(`/topics/${encodeURIComponent(selectedTopicId)}`, { replace: true })
@@ -1047,6 +1050,7 @@ function App() {
   }, [
     allSets,
     clearStreamingTutorMessage,
+    isAnswerKeyRoute,
     loadedTopicId,
     navigate,
     selectedSetId,
@@ -1720,6 +1724,21 @@ function App() {
     await refreshTopics()
   }, [applyExamGenerationState, refreshTopics, selectedTopicId])
 
+  const generateAnswerKeyForExam = useCallback(async (setId: string) => {
+    if (!selectedTopicId) return
+    const response = await fetch(
+      `/api/topics/${encodeURIComponent(selectedTopicId)}/question-sets/${encodeURIComponent(setId)}/answer-key`,
+      { method: 'POST' },
+    )
+    if (!response.ok) throw new Error(await response.text())
+    const payload = await response.json() as {
+      bank: QuestionBank
+      set: QuestionSet
+    }
+    setBank(payload.bank)
+    return payload.set
+  }, [selectedTopicId])
+
   if (!selectedTopicId) {
     return (
       <main className="app-shell">
@@ -1736,6 +1755,18 @@ function App() {
     return (
       <main className="app-shell centered">
         <div className="loading-panel">Loading topic...</div>
+      </main>
+    )
+  }
+
+  if (isAnswerKeyRoute && activeSet) {
+    return (
+      <main className="app-shell answer-key-shell">
+        <AnswerKeyPanel
+          topicId={activeTopic.id}
+          set={activeSet}
+          onGenerateAnswerKey={generateAnswerKeyForExam}
+        />
       </main>
     )
   }
@@ -2055,6 +2086,166 @@ const WeakSpotsDonePanel = memo(function WeakSpotsDonePanel({
         <h2>All Done!</h2>
         <p>No missed questions left.</p>
       </div>
+    </section>
+  )
+})
+
+const AnswerKeyPanel = memo(function AnswerKeyPanel({
+  topicId,
+  set,
+  onGenerateAnswerKey,
+}: {
+  topicId: string
+  set: QuestionSet
+  onGenerateAnswerKey: (setId: string) => Promise<QuestionSet | undefined>
+}) {
+  const [isGeneratingAnswerKey, setIsGeneratingAnswerKey] = useState(false)
+  const [answerKeyError, setAnswerKeyError] = useState<string | null>(null)
+  const units = useMemo(() => buildQuestionUnits(set.questions), [set.questions])
+  const menuHref = `/topics/${encodeURIComponent(topicId)}`
+  const missingAnswerCount = useMemo(
+    () => set.questions.filter((question) => !hasDisplayableAnswerKey(question)).length,
+    [set.questions],
+  )
+
+  const generateAnswerKey = useCallback(async () => {
+    if (isGeneratingAnswerKey) return
+    try {
+      setIsGeneratingAnswerKey(true)
+      setAnswerKeyError(null)
+      await onGenerateAnswerKey(set.id)
+    } catch (generationError) {
+      setAnswerKeyError(String(generationError))
+    } finally {
+      setIsGeneratingAnswerKey(false)
+    }
+  }, [isGeneratingAnswerKey, onGenerateAnswerKey, set.id])
+
+  return (
+    <section className="answer-key-panel">
+      <header className="study-header answer-key-header">
+        <div className="study-title">
+          <Link className="ghost-button" to={menuHref}>
+            Menu
+          </Link>
+          <div>
+            <p className="eyebrow">Correct Answers</p>
+            <h1>{set.title}</h1>
+          </div>
+        </div>
+        <div className="study-metrics">
+          <Stat label="Questions" value={String(set.questions.length)} />
+        </div>
+      </header>
+
+      {missingAnswerCount > 0 && (
+        <div className="answer-key-generate-panel">
+          <div>
+            <strong>{missingAnswerCount} answer{missingAnswerCount === 1 ? '' : 's'} missing</strong>
+            <span>Codex can solve this exam and save the answer key.</span>
+          </div>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={isGeneratingAnswerKey}
+            onClick={() => void generateAnswerKey()}
+          >
+            {isGeneratingAnswerKey ? 'Generating...' : 'Generate correct answers'}
+          </button>
+        </div>
+      )}
+      {answerKeyError && <div className="error-box">{answerKeyError}</div>}
+
+      <div className="answer-key-scroll question-scroll">
+        {units.length === 0 ? (
+          <div className="answer-key-empty">No questions found.</div>
+        ) : (
+          <div className="answer-key-list">
+            {units.map((unit) => (
+              <article key={unit.id} className="answer-key-card question-card">
+                <header className="answer-key-card-header">
+                  <div>
+                    <span>{unit.source}</span>
+                    <h2>{unit.title}</h2>
+                  </div>
+                  <small>{unit.questions.length === 1 ? '1 question' : `${unit.questions.length} questions`}</small>
+                </header>
+                {unit.sharedPrompt && (
+                  <div className="shared-question-context answer-key-shared-context">
+                    <MarkdownBlock className="question-prose">{unit.sharedPrompt}</MarkdownBlock>
+                  </div>
+                )}
+                <div className={unit.questions.length > 1 ? 'question-group' : undefined}>
+                  {unit.questions.map((question) => (
+                    <AnswerKeyQuestion
+                      key={question.id}
+                      question={question}
+                      sharedPrompt={unit.sharedPrompt ?? ''}
+                      showHeading={unit.questions.length > 1}
+                    />
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+})
+
+const AnswerKeyQuestion = memo(function AnswerKeyQuestion({
+  question,
+  sharedPrompt,
+  showHeading,
+}: {
+  question: Question
+  sharedPrompt: string
+  showHeading: boolean
+}) {
+  const correctOptionIds = getCorrectOptionIds(question)
+  const expectedAnswer = getExpectedAnswer(question)
+  const displayPrompt = useMemo(
+    () => removeSharedImageTags(question.prompt, sharedPrompt),
+    [question.prompt, sharedPrompt],
+  )
+
+  return (
+    <section className="subquestion answer-key-question">
+      <div className="subquestion-heading">
+        <span>{showHeading ? question.number : `${question.number}. ${question.title}`}</span>
+        {question.points ? <small>{question.points}p</small> : null}
+      </div>
+      <MarkdownBlock className="question-prose">{displayPrompt}</MarkdownBlock>
+      {question.type === 'open' ? (
+        expectedAnswer ? (
+          <div className="answer-key-open-answer">
+            <span>Model answer</span>
+            <MarkdownBlock className="question-prose">{expectedAnswer}</MarkdownBlock>
+          </div>
+        ) : (
+          <div className="answer-key-unavailable">No model answer stored.</div>
+        )
+      ) : correctOptionIds.length > 0 ? (
+        <div className="options-grid answer-key-options">
+          {question.options.map((option) => {
+            const isCorrect = correctOptionIds.includes(option.id)
+            return (
+              <div
+                key={option.id}
+                className={optionButtonClassName(false, false, false, isCorrect)}
+              >
+                <span className={`answer-key-option-marker ${isCorrect ? 'correct' : ''}`}>
+                  {option.id}
+                </span>
+                <MarkdownBlock className="option-prose">{option.text}</MarkdownBlock>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="answer-key-unavailable">No correct option key stored.</div>
+      )}
     </section>
   )
 })
@@ -3103,6 +3294,7 @@ function ExamMenu({
   const [examDeleteTarget, setExamDeleteTarget] = useState<QuestionSet | null>(null)
   const [isDeletingExam, setIsDeletingExam] = useState(false)
   const [deleteExamError, setDeleteExamError] = useState<string | null>(null)
+  const [openExamActionMenuId, setOpenExamActionMenuId] = useState<string | null>(null)
   const isBusy = examGeneration.status === 'processing'
   const allQuestionsSet = sets.find((set) => set.id === allQuestionsSetId) ?? null
   const weakSpotsSet = sets.find((set) => set.id === weakSpotsSetId) ?? null
@@ -3154,6 +3346,27 @@ function ExamMenu({
   }, [examDeleteTarget, isDeletingExam, onDeleteExam])
 
   const sourceItems = useMemo(() => sourceSidebarItems(sources), [sources])
+
+  useEffect(() => {
+    if (!openExamActionMenuId) return
+
+    function closeExamActionMenuOnOutsideClick(event: PointerEvent) {
+      if (!(event.target instanceof Element)) return
+      if (event.target.closest('[data-exam-actions-root]')) return
+      setOpenExamActionMenuId(null)
+    }
+
+    function closeExamActionMenuOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpenExamActionMenuId(null)
+    }
+
+    document.addEventListener('pointerdown', closeExamActionMenuOnOutsideClick)
+    document.addEventListener('keydown', closeExamActionMenuOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeExamActionMenuOnOutsideClick)
+      document.removeEventListener('keydown', closeExamActionMenuOnEscape)
+    }
+  }, [openExamActionMenuId])
 
   return (
     <section className="menu-screen topic-exam-screen">
@@ -3314,20 +3527,46 @@ function ExamMenu({
             const isGeneratedExam = set.sourceType === 'generated'
             return (
               <div key={set.id} className="exam-tile-shell">
-                {isGeneratedExam && (
+                <div className="exam-tile-actions" data-exam-actions-root>
                   <button
                     className="exam-tile-menu-button"
                     type="button"
+                    aria-haspopup="menu"
+                    aria-expanded={openExamActionMenuId === set.id}
                     aria-label={`Open actions for ${set.title}`}
                     title={`Open actions for ${set.title}`}
-                    onClick={() => {
-                      setDeleteExamError(null)
-                      setExamDeleteTarget(set)
+                    onClick={(event) => {
+                      event.preventDefault()
+                      setOpenExamActionMenuId((current) => current === set.id ? null : set.id)
                     }}
                   >
                     <ThreeDotIcon />
                   </button>
-                )}
+                  {openExamActionMenuId === set.id && (
+                    <div className="exam-tile-action-menu" role="menu">
+                      <Link
+                        role="menuitem"
+                        to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(set.id)}/answers`}
+                        onClick={() => setOpenExamActionMenuId(null)}
+                      >
+                        View correct answers
+                      </Link>
+                      {isGeneratedExam && (
+                        <button
+                          role="menuitem"
+                          type="button"
+                          onClick={() => {
+                            setOpenExamActionMenuId(null)
+                            setDeleteExamError(null)
+                            setExamDeleteTarget(set)
+                          }}
+                        >
+                          Delete exam
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <Link
                   className={`exam-tile${isGeneratedExam ? ' generated-exam-tile' : ''}`}
                   to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(set.id)}`}
@@ -4205,6 +4444,21 @@ function getCorrectOptionIds(question: Question) {
   if (Array.isArray(question.answer?.correctOptionIds)) return question.answer.correctOptionIds
   if (Array.isArray(question.correctOptionIds)) return question.correctOptionIds
   return []
+}
+
+function getExpectedAnswer(question: Question) {
+  if (typeof question.answer?.expectedText === 'string' && question.answer.expectedText.trim()) {
+    return question.answer.expectedText.trim()
+  }
+  if (typeof question.expectedAnswer === 'string' && question.expectedAnswer.trim()) {
+    return question.expectedAnswer.trim()
+  }
+  return ''
+}
+
+function hasDisplayableAnswerKey(question: Question) {
+  if (question.type === 'open') return Boolean(getExpectedAnswer(question))
+  return getCorrectOptionIds(question).length > 0
 }
 
 function isUnitAnswered(unit: QuestionUnit, answersByQuestion: Record<string, AnswerPayload>) {

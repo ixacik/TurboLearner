@@ -12,6 +12,7 @@ import {
   assertGeneratedChoiceAnswerDistribution,
   assertGeneratedMultiSelectAnswerVariety,
   buildExamDraftGenerationPrompt,
+  buildGeneratedExamProgrammaticFeedback,
   buildExamReviewPrompt,
   createExamGenerationPromptContext,
 } from './examGenerationHelpers.mjs'
@@ -177,6 +178,17 @@ app.delete('/api/topics/:topicId/question-sets/:setId', (req, res) => {
     const setId = sanitizePathSegment(req.params.setId)
     deleteGeneratedQuestionSet(topicId, setId)
     res.json({ ok: true, bank: topicQuestionBank(topicId), generation: publicTopicExamGenerationState(topicId) })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/topics/:topicId/question-sets/:setId/answer-key', async (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const setId = sanitizePathSegment(req.params.setId)
+    const set = await generateQuestionSetAnswerKey(topicId, setId)
+    res.json({ ok: true, set, bank: topicQuestionBank(topicId) })
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
   }
@@ -1689,6 +1701,207 @@ function persistGeneratedExamSetForTopic(topicId, set) {
   )
 }
 
+async function generateQuestionSetAnswerKey(topicId, setId) {
+  if (!setId || setId === allQuestionsSetId || setId === weakSpotsSetId) {
+    throw new Error('Answer keys can be generated for individual exams only.')
+  }
+
+  const set = getQuestionSet(topicId, setId)
+  if (!set) throw new Error('Exam not found.')
+  const missingQuestions = set.questions.filter((question) => !hasStoredAnswerKey(question))
+  if (missingQuestions.length === 0) return set
+
+  const rawAnswerKey = await askCodexForQuestionSetAnswerKey(topicId, set)
+  const answersByQuestion = normalizeSolvedAnswerKey(rawAnswerKey, set)
+  return persistQuestionSetAnswerKey(topicId, setId, answersByQuestion)
+}
+
+async function askCodexForQuestionSetAnswerKey(topicId, set) {
+  const response = await codex.request('thread/start', {
+    cwd: appRoot,
+    approvalPolicy: 'never',
+    sandbox: 'read-only',
+    ephemeral: true,
+    developerInstructions: [
+      'You solve TurboLearner exams and return strict JSON only.',
+      'Do not edit files, run commands, browse, or call tools.',
+      persistentCourseContextInstructions(topicId),
+    ].filter(Boolean).join('\n\n'),
+  })
+  const threadId = response.thread.id
+  let markdown = ''
+
+  await codex.startTurn({
+    threadId,
+    input: [{
+      type: 'text',
+      text: buildAnswerKeyGenerationPrompt(set),
+      text_elements: [],
+    }],
+    cwd: appRoot,
+    approvalPolicy: 'never',
+    sandboxPolicy: { type: 'readOnly', networkAccess: false },
+    timeoutMs: examGenerationTurnTimeoutMs,
+    onNotification: (message) => {
+      if (message.method === 'item/agentMessage/delta') {
+        markdown += message.params?.delta ?? ''
+      }
+    },
+  })
+
+  return extractAnswerKeyJson(markdown)
+}
+
+function buildAnswerKeyGenerationPrompt(set) {
+  const answerlessSet = {
+    id: set.id,
+    title: set.title,
+    description: set.description,
+    questions: set.questions.map(questionWithoutAnswerKey),
+  }
+  return `
+Solve this entire TurboLearner exam and return a complete answer key.
+
+Return only strict JSON, with this exact shape:
+{
+  "answers": {
+    "question-id": {
+      "correctOptionIds": ["A"],
+      "expectedText": null
+    }
+  }
+}
+
+Rules:
+- Include one entry for every question id.
+- For "single" and "multiple" questions, correctOptionIds must contain the option.id values that are correct. Use the ids from the provided options exactly.
+- For "open" questions, correctOptionIds must be null and expectedText must be a concise exam-ready model answer or rubric.
+- For choice questions, expectedText may be null or a brief rationale.
+- Do not include Markdown fences, comments, prose, or any keys outside the JSON object.
+- If more than one option is defensibly correct, include every correct option id.
+
+Exam JSON:
+${JSON.stringify(answerlessSet, null, 2)}
+`.trim()
+}
+
+function extractAnswerKeyJson(markdown) {
+  const text = String(markdown || '').trim()
+  const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+    .map((match) => match[1].trim())
+    .reverse()
+    .find((block) => block.startsWith('{'))
+  const rawJson = fenced || text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
+  if (!rawJson.trim()) throw new Error('Codex did not return an answer-key JSON object.')
+  try {
+    return JSON.parse(rawJson)
+  } catch (error) {
+    throw new Error(`Answer-key JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function normalizeSolvedAnswerKey(rawAnswerKey, set) {
+  const rawAnswers = rawAnswerKey?.answers && typeof rawAnswerKey.answers === 'object' && !Array.isArray(rawAnswerKey.answers)
+    ? rawAnswerKey.answers
+    : rawAnswerKey
+  if (!rawAnswers || typeof rawAnswers !== 'object' || Array.isArray(rawAnswers)) {
+    throw new Error('Codex answer key is missing an answers object.')
+  }
+
+  const normalized = {}
+  for (const question of set.questions) {
+    const rawAnswer = rawAnswers[question.id]
+    if (!rawAnswer || typeof rawAnswer !== 'object' || Array.isArray(rawAnswer)) {
+      throw new Error(`Answer key is missing ${question.id}.`)
+    }
+
+    if (question.type === 'open') {
+      const expectedText = nonEmptyString(rawAnswer.expectedText ?? rawAnswer.expectedAnswer, '')
+      normalized[question.id] = {
+        correctOptionIds: null,
+        expectedText,
+        source: 'inferred',
+      }
+      continue
+    }
+
+    const optionIds = new Set(question.options.map((option) => option.id))
+    const correctOptionIds = Array.isArray(rawAnswer.correctOptionIds)
+      ? rawAnswer.correctOptionIds.filter((id) => typeof id === 'string' && id.trim())
+      : []
+    if (correctOptionIds.length === 0) {
+      throw new Error(`${question.id} is missing correctOptionIds.`)
+    }
+    const unknownIds = correctOptionIds.filter((id) => !optionIds.has(id))
+    if (unknownIds.length > 0) {
+      throw new Error(`${question.id} references unknown option id${unknownIds.length === 1 ? '' : 's'}: ${unknownIds.join(', ')}`)
+    }
+
+    normalized[question.id] = {
+      correctOptionIds: [...new Set(correctOptionIds)],
+      expectedText: typeof rawAnswer.expectedText === 'string' && rawAnswer.expectedText.trim()
+        ? rawAnswer.expectedText.trim()
+        : null,
+      source: 'inferred',
+    }
+  }
+
+  return normalized
+}
+
+function persistQuestionSetAnswerKey(topicId, setId, answersByQuestion) {
+  const row = db.prepare(`
+    SELECT id, title, description, source_type, source_path, questions_json
+    FROM question_sets
+    WHERE topic_id = ? AND id = ?
+  `).get(topicId, setId)
+  if (!row) throw new Error('Exam not found.')
+
+  const questions = parseJson(row.questions_json, [])
+  const nextQuestions = questions.map((question) => {
+    const answer = answersByQuestion[question.id]
+    if (!answer) return question
+    return {
+      ...question,
+      answer: {
+        correctOptionIds: answer.correctOptionIds,
+        expectedText: answer.expectedText,
+        source: answer.source,
+      },
+      ...(Array.isArray(answer.correctOptionIds) ? { correctOptionIds: answer.correctOptionIds } : {}),
+      ...(answer.expectedText ? { expectedAnswer: answer.expectedText } : {}),
+    }
+  })
+
+  db.prepare(`
+    UPDATE question_sets
+    SET questions_json = ?, updated_at = ?
+    WHERE topic_id = ? AND id = ?
+  `).run(JSON.stringify(nextQuestions), new Date().toISOString(), topicId, setId)
+
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    sourceType: row.source_type,
+    sourcePath: row.source_path,
+    questions: nextQuestions,
+  }
+}
+
+function hasStoredAnswerKey(question) {
+  if (question.type === 'open') {
+    return Boolean(
+      (typeof question.answer?.expectedText === 'string' && question.answer.expectedText.trim()) ||
+      (typeof question.expectedAnswer === 'string' && question.expectedAnswer.trim())
+    )
+  }
+  return (
+    (Array.isArray(question.answer?.correctOptionIds) && question.answer.correctOptionIds.length > 0) ||
+    (Array.isArray(question.correctOptionIds) && question.correctOptionIds.length > 0)
+  )
+}
+
 function deleteGeneratedQuestionSet(topicId, setId) {
   if (!setId || setId === allQuestionsSetId || setId === weakSpotsSetId) {
     throw new Error('Generated exam not found.')
@@ -2823,6 +3036,8 @@ async function generatePersistentExam(jobId, files) {
     if (jobId !== examGenerationJobId) return
 
     const draftSet = extractGeneratedQuestionSet(draftMarkdown)
+    const programmaticFeedback = buildGeneratedExamProgrammaticFeedback(draftSet)
+    appendExamGenerationLog(jobId, 'status', programmaticFeedbackLogMessage(programmaticFeedback), programmaticFeedback.text)
     setExamGenerationPhase(jobId, 'Reviewing and repairing draft exam')
     const finalMarkdown = await reviewAndRepairGeneratedExamWithCodex(jobId, {
       examId,
@@ -2831,6 +3046,7 @@ async function generatePersistentExam(jobId, files) {
       failedFiles,
       promptContext,
       draftSet,
+      programmaticFeedback: programmaticFeedback.text,
     })
     if (jobId !== examGenerationJobId) return
 
@@ -2964,6 +3180,8 @@ async function generatePersistentExamForTopic(topicId, jobId) {
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
     const draftSet = readGeneratedQuestionSetFile(draftOutputPath)
+    const programmaticFeedback = buildGeneratedExamProgrammaticFeedback(draftSet)
+    appendTopicExamGenerationLog(topicId, jobId, 'status', programmaticFeedbackLogMessage(programmaticFeedback), programmaticFeedback.text)
     setTopicExamGenerationPhase(topicId, jobId, 'Reviewing and repairing draft exam')
     await reviewAndRepairGeneratedExamWithCodex(jobId, {
       topicId,
@@ -2975,6 +3193,7 @@ async function generatePersistentExamForTopic(topicId, jobId) {
       failedFiles,
       promptContext,
       draftSet,
+      programmaticFeedback: programmaticFeedback.text,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
@@ -3053,6 +3272,7 @@ async function reviewAndRepairGeneratedExamWithCodex(jobId, {
   promptContext,
   codeExampleFiles = [],
   draftSet,
+  programmaticFeedback = null,
 }) {
   return runExamCodexTurn(jobId, {
     topicId,
@@ -3060,6 +3280,7 @@ async function reviewAndRepairGeneratedExamWithCodex(jobId, {
     developerInstructions: `
 You are a strict TurboLearner exam reviewer and editor.
 Review the draft against lecture material, real-exam style examples, and all prior-exam coverage history.
+Use the Programmatic draft audit in the user prompt as concrete app feedback.
 Rewrite, replace, and repair the draft directly. Do not merely critique it.
 For any new image-based replacement question, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available, then copy the selected PNG/JPEG into the requested exam asset directory.
 You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
@@ -3077,8 +3298,16 @@ When an output path is provided, write the corrected final question set JSON to 
       promptContext,
       codeExampleFiles,
       draftSet,
+      programmaticFeedback,
     }),
   })
+}
+
+function programmaticFeedbackLogMessage(feedback) {
+  const issueCount = Array.isArray(feedback?.issues) ? feedback.issues.length : 0
+  return feedback?.hasIssues
+    ? `Programmatic draft audit found ${issueCount} blocking issue${issueCount === 1 ? '' : 's'}.`
+    : 'Programmatic draft audit found no blocking issues.'
 }
 
 async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerInstructions, prompt }) {

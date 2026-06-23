@@ -1,5 +1,8 @@
 const maxStyleQuestionsPerSet = 36
 const maxCoverageAngles = 220
+const predictableMultiSelectDominanceRatio = 0.75
+const predictableMultiSelectMinCount = 3
+const feedbackQuestionReferenceLimit = 14
 
 export function createExamGenerationPromptContext(baseBank) {
   const sets = Array.isArray(baseBank?.sets) ? baseBank.sets : []
@@ -69,9 +72,11 @@ export function buildExamReviewPrompt({
   promptContext,
   codeExampleFiles = [],
   draftSet,
+  programmaticFeedback = null,
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
   const imageUrlPrefix = imageUrlPrefixFor(topicId, examId)
+  const draftAudit = String(programmaticFeedback || '').trim() || 'No programmatic draft audit was provided.'
 
   return `
 Review and repair this draft TurboLearner exam. Return the corrected final exam JSON.
@@ -90,10 +95,15 @@ Output contract:
 - Preserve valid generated image references when the question remains valid.
 - If you introduce a new image question, generate/copy a PNG/JPEG into the asset directory and reference it as <image>${imageUrlPrefix}filename.png</image>.
 - Final JSON must pass every shared guideline below.
+- Resolve every blocking issue in the Programmatic draft audit before writing final JSON. These checks run again after review.
 
 ${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
+Programmatic draft audit:
+${draftAudit}
+
 Review rubric:
+- Treat the Programmatic draft audit as concrete failing feedback from the app; repair every blocking issue it lists before finalizing.
 - Replace or rewrite questions that are near-duplicates of any prior real or generated question.
 - Remove pure spinoffs that keep the same scenario, wording, code bug, diagram setup, numeric setup, or option pattern.
 - Fix multi-select questions where no options are correct, and avoid making the number of correct options predictable across the set.
@@ -205,34 +215,178 @@ export function assertGeneratedChoiceAnswerDistribution({ questionId, type, opti
 }
 
 export function assertGeneratedMultiSelectAnswerVariety(questions) {
+  const stats = generatedMultiSelectAnswerStats(questions)
+
+  if (!stats.isPredictable) return
+
+  throw new Error(
+    `Generated multi-select answer counts are too predictable: ${stats.dominantCount}/${stats.total} use ${stats.dominantPattern} correct options.`,
+  )
+}
+
+export function buildGeneratedExamProgrammaticFeedback(questionSet) {
+  const questions = Array.isArray(questionSet) ? questionSet : (
+    Array.isArray(questionSet?.questions) ? questionSet.questions : []
+  )
+  const issues = []
+  const stats = generatedMultiSelectAnswerStats(questions)
+  const typeCounts = sortedCounts(questions.map((question) => question?.type || 'unknown'))
+  const contentSignals = generatedQuestionContentSignals(questions)
+
+  if (questions.length === 0) {
+    issues.push({
+      code: 'empty-question-set',
+      message: 'Draft contains no questions.',
+      detail: 'The reviewer must produce a complete TurboLearner question set JSON object with questions.',
+    })
+  }
+
+  if (stats.invalidAnswerCounts.length > 0) {
+    issues.push({
+      code: 'invalid-multi-select-answer-counts',
+      message: `${stats.invalidAnswerCounts.length} multi-select question${stats.invalidAnswerCounts.length === 1 ? '' : 's'} have invalid answer counts.`,
+      detail: `Multi-selects must have at least one correct option and no more correct options than available choices. Affected questions: ${formatQuestionReferences(stats.invalidAnswerCounts)}.`,
+    })
+  }
+
+  if (stats.unknownCorrectOptionQuestions.length > 0) {
+    issues.push({
+      code: 'unknown-correct-option-ids',
+      message: `${stats.unknownCorrectOptionQuestions.length} multi-select question${stats.unknownCorrectOptionQuestions.length === 1 ? '' : 's'} reference correct option ids that are not present in their options.`,
+      detail: `Fix answer.correctOptionIds so every id exists in options. Affected questions: ${formatQuestionReferences(stats.unknownCorrectOptionQuestions)}.`,
+    })
+  }
+
+  if (stats.isPredictable) {
+    issues.push({
+      code: 'predictable-multi-select-answer-counts',
+      message: `Generated multi-select answer counts are too predictable: ${stats.dominantCount}/${stats.total} use ${stats.dominantPattern} correct options.`,
+      detail: `Affected ${stats.dominantPattern} questions: ${formatQuestionReferences(stats.dominantQuestions)}. Rewrite enough prompts, options, answer keys, or question types so the final multi-select answer-count distribution is mixed. Do not randomly flip answers; preserve course-grounded correctness.`,
+    })
+  }
+
+  const lines = [
+    issues.length > 0
+      ? `Blocking issues detected (${issues.length}):`
+      : 'No blocking programmatic issues detected.',
+    ...issues.flatMap((issue) => [`- ${issue.message}`, `  ${issue.detail}`]),
+    `Question type counts: ${formatCountMap(typeCounts)}.`,
+    `Content signals: ${contentSignals.codeQuestionCount} code question(s), ${contentSignals.imageQuestionCount} image/graph question(s), ${contentSignals.groupedQuestionCount} grouped child question(s).`,
+    stats.total > 0
+      ? `Multi-select answer-count distribution: ${formatCountMap(stats.counts)}.`
+      : 'Multi-select answer-count distribution: none.',
+  ]
+
+  return {
+    hasIssues: issues.length > 0,
+    issues,
+    text: lines.join('\n'),
+  }
+}
+
+function generatedMultiSelectAnswerStats(questions) {
   const multiSelects = (Array.isArray(questions) ? questions : [])
     .filter((question) => question?.type === 'multiple')
     .map((question) => {
-      const correctOptionIds = Array.isArray(question?.answer?.correctOptionIds)
-        ? question.answer.correctOptionIds
-        : Array.isArray(question?.correctOptionIds)
-          ? question.correctOptionIds
-          : []
+      const options = Array.isArray(question?.options) ? question.options : []
+      const optionIds = new Set(options.map((option, index) => {
+        const explicitId = String(option?.id ?? '').trim()
+        return explicitId || String.fromCharCode(65 + index)
+      }))
+      const correctOptionIds = generatedCorrectOptionIds(question)
+      const unknownCorrectOptionIds = correctOptionIds.filter((id) => !optionIds.has(id))
+      const correctCount = correctOptionIds.length
+      const optionCount = options.length
       return {
         id: question?.id || question?.number || 'multi-select question',
-        optionCount: Array.isArray(question?.options) ? question.options.length : 0,
-        correctCount: correctOptionIds.length,
+        number: question?.number,
+        title: question?.title,
+        reference: questionReference(question),
+        optionCount,
+        correctCount,
+        correctOptionIds,
+        unknownCorrectOptionIds,
+        pattern: `${correctCount}/${optionCount}`,
       }
     })
 
-  if (multiSelects.length < 3) return
+  const counts = sortedCounts(multiSelects.map((question) => question.pattern))
+  const [dominantPattern, dominantCount = 0] = Object.entries(counts)[0] ?? []
+  const dominanceRatio = multiSelects.length > 0 ? dominantCount / multiSelects.length : 0
+  const dominantQuestions = dominantPattern
+    ? multiSelects.filter((question) => question.pattern === dominantPattern)
+    : []
 
-  const counts = countBy(multiSelects.map((question) => `${question.correctCount}/${question.optionCount}`))
-  const [dominantPattern, dominantCount] = Object.entries(counts)
-    .sort(([, countA], [, countB]) => countB - countA)[0] ?? []
-  if (!dominantPattern || dominantCount < 3) return
-
-  const dominanceRatio = dominantCount / multiSelects.length
-  if (dominanceRatio >= 0.75) {
-    throw new Error(
-      `Generated multi-select answer counts are too predictable: ${dominantCount}/${multiSelects.length} use ${dominantPattern} correct options.`,
-    )
+  return {
+    total: multiSelects.length,
+    multiSelects,
+    counts,
+    dominantPattern,
+    dominantCount,
+    dominanceRatio,
+    dominantQuestions,
+    invalidAnswerCounts: multiSelects.filter((question) => (
+      question.correctCount < 1 || question.correctCount > question.optionCount
+    )),
+    unknownCorrectOptionQuestions: multiSelects.filter((question) => question.unknownCorrectOptionIds.length > 0),
+    isPredictable: Boolean(
+      multiSelects.length >= predictableMultiSelectMinCount &&
+      dominantPattern &&
+      dominantCount >= predictableMultiSelectMinCount &&
+      dominanceRatio >= predictableMultiSelectDominanceRatio
+    ),
   }
+}
+
+function generatedCorrectOptionIds(question) {
+  const rawCorrectIds = Array.isArray(question?.answer?.correctOptionIds)
+    ? question.answer.correctOptionIds
+    : Array.isArray(question?.correctOptionIds)
+      ? question.correctOptionIds
+      : []
+  return rawCorrectIds.map((id) => String(id))
+}
+
+function generatedQuestionContentSignals(questions) {
+  const safeQuestions = Array.isArray(questions) ? questions : []
+  return {
+    codeQuestionCount: safeQuestions.filter((question) => (
+      /<code\b/i.test(`${question?.prompt ?? ''}\n${question?.groupPrompt ?? ''}`)
+    )).length,
+    imageQuestionCount: safeQuestions.filter((question) => (
+      extractImageTags(question?.prompt).length > 0 ||
+      extractImageTags(question?.groupPrompt).length > 0 ||
+      (Array.isArray(question?.imagePaths) && question.imagePaths.length > 0)
+    )).length,
+    groupedQuestionCount: safeQuestions.filter((question) => question?.groupId).length,
+  }
+}
+
+function questionReference(question) {
+  const number = String(question?.number ?? '').trim()
+  const id = String(question?.id ?? '').trim()
+  const title = String(question?.title ?? '').trim()
+  const label = [
+    number ? `#${number}` : '',
+    id || '',
+  ].filter(Boolean).join(' ')
+  const fallback = label || title || 'multi-select question'
+  return title && title !== id
+    ? `${fallback} "${title.slice(0, 80)}"`
+    : fallback
+}
+
+function formatQuestionReferences(questions) {
+  const refs = questions.slice(0, feedbackQuestionReferenceLimit).map((question) => question.reference || questionReference(question))
+  const extraCount = questions.length - refs.length
+  return `${refs.join(', ')}${extraCount > 0 ? `, and ${extraCount} more` : ''}`
+}
+
+function formatCountMap(counts) {
+  const entries = Object.entries(counts || {})
+  return entries.length > 0
+    ? entries.map(([key, count]) => `${key}: ${count}`).join(', ')
+    : 'none'
 }
 
 function styleExampleSet(set) {
