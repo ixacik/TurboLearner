@@ -327,6 +327,7 @@ type ExamGenerationState = {
   generatedExamId: string | null
   generatedExamTitle: string | null
   questionCount: number
+  steeringPrompt: string
   log: ExamGenerationLogEntry[]
   error: string | null
 }
@@ -443,6 +444,7 @@ const emptyExamGenerationState: ExamGenerationState = {
   generatedExamId: null,
   generatedExamTitle: null,
   questionCount: 0,
+  steeringPrompt: '',
   log: [],
   error: null,
 }
@@ -670,6 +672,7 @@ function App() {
   const [isContextModalOpen, setIsContextModalOpen] = useState(false)
   const [examGeneration, setExamGeneration] = useState<ExamGenerationState>(loaderData.topicState?.generation ?? emptyExamGenerationState)
   const [isExamGenerationModalOpen, setIsExamGenerationModalOpen] = useState(false)
+  const [isExamSteeringModalOpen, setIsExamSteeringModalOpen] = useState(false)
   const [examGenerationToast, setExamGenerationToast] = useState<string | null>(null)
   const chatComposerRef = useRef<ChatComposerHandle>(null)
   const codexLogRef = useRef<HTMLDivElement>(null)
@@ -1625,11 +1628,16 @@ function App() {
     }
   }, [applyCourseContextState, refreshTopics, selectedTopicId])
 
-  const startExamGeneration = useCallback(async () => {
+  const startExamGeneration = useCallback(async (steeringPrompt = '') => {
     if (!selectedTopicId) return
     try {
+      setIsExamSteeringModalOpen(false)
       setIsExamGenerationModalOpen(true)
-      const response = await fetch(`/api/topics/${selectedTopicId}/exam-generation`, { method: 'POST' })
+      const response = await fetch(`/api/topics/${selectedTopicId}/exam-generation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ steeringPrompt }),
+      })
       if (!response.ok) throw new Error(await response.text())
       applyExamGenerationState(await response.json() as ExamGenerationState)
     } catch (uploadError) {
@@ -1785,9 +1793,9 @@ function App() {
           context={courseContext}
           onDeleteSource={deleteTopicSourceById}
           onDeleteExam={deleteGeneratedExamById}
-          onGenerateExam={startExamGeneration}
           onUploadSourceFiles={uploadTopicSourceFiles}
           onOpenContextModal={() => setIsContextModalOpen(true)}
+          onOpenExamSteeringModal={() => setIsExamSteeringModalOpen(true)}
           onOpenExamGenerationModal={() => setIsExamGenerationModalOpen(true)}
           error={error}
         />
@@ -1805,6 +1813,12 @@ function App() {
             generation={examGeneration}
             onClear={() => void clearExamGeneration()}
             onClose={() => setIsExamGenerationModalOpen(false)}
+          />
+        )}
+        {isExamSteeringModalOpen && (
+          <ExamSteeringModal
+            onCancel={() => setIsExamSteeringModalOpen(false)}
+            onStart={startExamGeneration}
           />
         )}
         {examGenerationToast && (
@@ -3268,9 +3282,9 @@ function ExamMenu({
   context,
   onDeleteSource,
   onDeleteExam,
-  onGenerateExam,
   onUploadSourceFiles,
   onOpenContextModal,
+  onOpenExamSteeringModal,
   onOpenExamGenerationModal,
   error,
 }: {
@@ -3282,9 +3296,9 @@ function ExamMenu({
   context: CourseContextState
   onDeleteSource: (sourceId: string) => void | Promise<void>
   onDeleteExam: (setId: string) => void | Promise<void>
-  onGenerateExam: () => void | Promise<void>
   onUploadSourceFiles: (files: FileList | SourceUploadInput[], sourceKind?: SourceUploadKind) => void | Promise<void>
   onOpenContextModal: () => void
+  onOpenExamSteeringModal: () => void
   onOpenExamGenerationModal: () => void
   error: string | null
 }) {
@@ -3495,7 +3509,7 @@ function ExamMenu({
                   onOpenExamGenerationModal()
                   return
                 }
-                void onGenerateExam()
+                onOpenExamSteeringModal()
               }}
             >
               {isBusy && <span className="context-spinner" aria-hidden="true" />}
@@ -3544,6 +3558,16 @@ function ExamMenu({
                   </button>
                   {openExamActionMenuId === set.id && (
                     <div className="exam-tile-action-menu" role="menu">
+                      <button
+                        role="menuitem"
+                        type="button"
+                        onClick={() => {
+                          setOpenExamActionMenuId(null)
+                          window.location.href = `/api/topics/${encodeURIComponent(topic.id)}/question-sets/${encodeURIComponent(set.id)}/export.pdf`
+                        }}
+                      >
+                        Export as PDF
+                      </button>
                       <Link
                         role="menuitem"
                         to={`/topics/${encodeURIComponent(topic.id)}/exams/${encodeURIComponent(set.id)}/answers`}
@@ -3851,6 +3875,83 @@ const DeleteExamModal = memo(function DeleteExamModal({
   )
 })
 
+const ExamSteeringModal = memo(function ExamSteeringModal({
+  onCancel,
+  onStart,
+}: {
+  onCancel: () => void
+  onStart: (steeringPrompt: string) => void | Promise<void>
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [steeringPrompt, setSteeringPrompt] = useState('')
+  const [isStarting, setIsStarting] = useState(false)
+
+  useEffect(() => {
+    textareaRef.current?.focus()
+  }, [])
+
+  const submitSteeringPrompt = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (isStarting) return
+    try {
+      setIsStarting(true)
+      await Promise.resolve(onStart(steeringPrompt))
+    } catch {
+      setIsStarting(false)
+    }
+  }, [isStarting, onStart, steeringPrompt])
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (!isStarting && event.target === event.currentTarget) onCancel()
+      }}
+    >
+      <form
+        className="context-modal exam-steering-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="exam-steering-modal-title"
+        onSubmit={(event) => void submitSteeringPrompt(event)}
+      >
+        <header className="context-modal-header">
+          <div>
+            <p className="eyebrow">Exam Generation</p>
+            <h2 id="exam-steering-modal-title">Steer this exam</h2>
+          </div>
+          <button className="ghost-button" type="button" disabled={isStarting} onClick={onCancel}>
+            Close
+          </button>
+        </header>
+
+        <label className="exam-steering-field">
+          <span>Prompt</span>
+          <textarea
+            ref={textareaRef}
+            value={steeringPrompt}
+            rows={8}
+            maxLength={8000}
+            placeholder="Make this more like the original exams: very hard options, tiny technical differences, same-looking sentences, and fewer obvious distractors."
+            disabled={isStarting}
+            onChange={(event) => setSteeringPrompt(event.currentTarget.value)}
+          />
+        </label>
+
+        <footer className="context-modal-actions">
+          <button className="secondary-button" type="button" disabled={isStarting} onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary-button" type="submit" disabled={isStarting}>
+            {isStarting ? 'Starting...' : 'Start generation'}
+          </button>
+        </footer>
+      </form>
+    </div>
+  )
+})
+
 const ExamGenerationModal = memo(function ExamGenerationModal({
   generation,
   onClear,
@@ -3902,6 +4003,13 @@ const ExamGenerationModal = memo(function ExamGenerationModal({
         </ul>
 
         {generation.error && <div className="error-box">{generation.error}</div>}
+
+        {generation.steeringPrompt && (
+          <section className="exam-steering-preview" aria-label="Exam steering prompt">
+            <span>Steering prompt</span>
+            <p>{generation.steeringPrompt}</p>
+          </section>
+        )}
 
         <div className="exam-generation-feed">
           {generation.log.length > 0 ? (

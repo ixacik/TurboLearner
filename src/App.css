@@ -2079,6 +2079,62 @@ body.resizing-codex-sidebar {
   width: min(900px, calc(100vw - 48px));
 }
 
+.exam-steering-modal {
+  width: min(680px, calc(100vw - 48px));
+}
+
+.exam-steering-field {
+  display: grid;
+  gap: 8px;
+}
+
+.exam-steering-field span,
+.exam-steering-preview span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.exam-steering-field textarea {
+  width: 100%;
+  min-height: 210px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 13px 14px;
+  resize: vertical;
+  color: var(--text-prose);
+  background: var(--code-bg);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+
+.exam-steering-field textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+.exam-steering-preview {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+
+.exam-steering-preview p {
+  margin: 0;
+  color: var(--text-prose);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .delete-exam-modal {
   width: min(520px, calc(100vw - 48px));
 }

@@ -11,6 +11,7 @@ import {
   buildGeneratedExamProgrammaticFeedback,
   createExamGenerationPromptContext,
 } from './examGenerationHelpers.mjs'
+import { buildQuestionSetLatex, sanitizePdfFileName } from './examPdfExport.mjs'
 import {
   extractNotebookText,
   extractSourceFile,
@@ -161,6 +162,139 @@ test('draft prompt falls back to text mode when no source manifest is provided',
 
   assert.match(prompt, /Course code examples and assignment scope:\nnone/)
   assert.match(prompt, /If no code examples are provided, avoid forced code questions/)
+})
+
+test('blank exam steering prompt is omitted from draft and review prompts', () => {
+  const promptContext = createExamGenerationPromptContext(baseBank)
+  const commonArgs = {
+    topicId: 'machine-learning',
+    examId: 'generated-test',
+    examAssetDir: '/tmp/generated-test',
+    usableFiles: [{ name: 'lecture.md', text: 'Lecture text.' }],
+    failedFiles: [],
+    codeExampleFiles: [],
+    promptContext,
+    steeringPrompt: '   ',
+  }
+
+  const draftPrompt = buildExamDraftGenerationPrompt(commonArgs)
+  const reviewPrompt = buildExamReviewPrompt({
+    ...commonArgs,
+    draftSet: {
+      id: 'generated-test',
+      title: 'Generated Exam',
+      description: 'Draft.',
+      sourcePath: '',
+      questions: [question({ id: 'generated-test-q1', prompt: 'Draft question.' })],
+    },
+  })
+
+  assert.doesNotMatch(draftPrompt, /User exam steering prompt:/)
+  assert.doesNotMatch(reviewPrompt, /User exam steering prompt:/)
+})
+
+test('exam steering prompt is included in both draft and review prompts', () => {
+  const steeringPrompt = [
+    'Make this more like the original exams.',
+    'All options should be very hard with minor technical wording changes.',
+  ].join('\n')
+  const promptContext = createExamGenerationPromptContext(baseBank)
+  const commonArgs = {
+    topicId: 'machine-learning',
+    examId: 'generated-test',
+    examAssetDir: '/tmp/generated-test',
+    usableFiles: [{ name: 'lecture.md', text: 'Lecture text.' }],
+    failedFiles: [],
+    codeExampleFiles: [],
+    promptContext,
+    steeringPrompt,
+  }
+
+  const draftPrompt = buildExamDraftGenerationPrompt(commonArgs)
+  const reviewPrompt = buildExamReviewPrompt({
+    ...commonArgs,
+    draftSet: {
+      id: 'generated-test',
+      title: 'Generated Exam',
+      description: 'Draft.',
+      sourcePath: '',
+      questions: [question({ id: 'generated-test-q1', prompt: 'Draft question.' })],
+    },
+  })
+
+  assert.match(draftPrompt, /User exam steering prompt:/)
+  assert.match(reviewPrompt, /User exam steering prompt:/)
+  assert.match(draftPrompt, /Make this more like the original exams\./)
+  assert.match(reviewPrompt, /minor technical wording changes/)
+  assert.match(draftPrompt, /Shared question-set guidelines:/)
+  assert.match(reviewPrompt, /Real exam style examples:/)
+})
+
+test('PDF export latex renders math tags and raw formula options', () => {
+  const latex = buildQuestionSetLatex({
+    topicName: 'Introduction to Reinforcement Learning',
+    set: {
+      title: 'Generated Exam 4',
+      questions: [
+        question({
+          id: 'q1',
+          number: '15',
+          prompt: 'What is the correct form of the 3-step return?',
+          options: [
+            { id: 'A', text: '<math display>R_{t+1}+\\gamma R_{t+2}+\\gamma^2R_{t+3}</math>' },
+            { id: 'B', text: '<math display>\\sum_s p(s\\mid S_t,A_t)V(s)</math>' },
+            { id: 'C', text: '\\max_a Q(S_{t+1},a)' },
+          ],
+          correctOptionIds: ['B'],
+        }),
+      ],
+    },
+  })
+
+  assert.match(latex, /\\item\[\\textbf\{A\.\}\] \\\(R_\{t\+1\}\+\\gamma R_\{t\+2\}\+\\gamma\^2R_\{t\+3\}\\\)/)
+  assert.match(latex, /\\item\[\\textbf\{B\.\}\] \\\(\\sum_\{s\} p\(s\\mid S_t,A_t\)V\(s\)\\\)/)
+  assert.match(latex, /\\item\[\\textbf\{C\.\}\] \\\(\\max_\{a\} Q\(S_\{t\+1\},a\)\\\)/)
+  assert.doesNotMatch(latex, /R\\_\\\{t/)
+  assert.match(latex, /\\textbf\{15\.\} B/)
+})
+
+test('PDF export latex keeps images inline inside questions', () => {
+  const latex = buildQuestionSetLatex({
+    topicName: 'Introduction to Reinforcement Learning',
+    resolveImagePath: (imagePath) => imagePath === '/api/generated-assets/topic/exam/q34.png'
+      ? '/tmp/q34.png'
+      : null,
+    set: {
+      title: 'Generated Exam 4',
+      questions: [
+        question({
+          id: 'q34',
+          number: '34',
+          type: 'open',
+          prompt: [
+            'Compute the update.',
+            '<image>/api/generated-assets/topic/exam/q34.png</image>',
+            'Use Q-learning.',
+          ].join('\n\n'),
+          options: [],
+          answer: {
+            correctOptionIds: null,
+            expectedText: 'The new estimate is <math>q(s,a)=5.5</math>.',
+            source: 'inferred',
+          },
+        }),
+      ],
+    },
+  })
+
+  assert.match(latex, /Compute the update\.[\s\S]*\\includegraphics\[[^\]]+\]\{\\detokenize\{\/tmp\/q34\.png\}\}[\s\S]*Use Q-learning\./)
+  assert.doesNotMatch(latex, /\\begin\{figure\}/)
+  assert.match(latex, /\\textbf\{34\.\} The new estimate is \\\(q\(s,a\)=5\.5\\\)\./)
+})
+
+test('PDF export filenames are sanitized', () => {
+  assert.equal(sanitizePdfFileName('Generated Exam 4'), 'Generated Exam 4.pdf')
+  assert.equal(sanitizePdfFileName('Exam: RL / AlphaGo?.pdf'), 'Exam- RL - AlphaGo-.pdf')
 })
 
 test('notebook extraction preserves markdown and code cells but skips outputs', () => {

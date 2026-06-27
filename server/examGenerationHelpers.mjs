@@ -28,9 +28,11 @@ export function buildExamDraftGenerationPrompt({
   failedFiles,
   promptContext,
   codeExampleFiles = [],
+  steeringPrompt = '',
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
   const imageUrlPrefix = imageUrlPrefixFor(topicId, examId)
+  const steeringBlock = examSteeringPromptBlock(steeringPrompt)
 
   return `
 Generate one new TurboLearner exam question set.
@@ -43,6 +45,8 @@ Output contract:
 - Write exactly one TurboLearner question set JSON object, not a full bank.
 - Save the JSON file here: ${outputPath || 'return the JSON in your final response'}.
 - If an output path is provided, create or overwrite that file yourself and keep your final chat response brief.
+
+${steeringBlock}
 
 ${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
@@ -73,10 +77,12 @@ export function buildExamReviewPrompt({
   codeExampleFiles = [],
   draftSet,
   programmaticFeedback = null,
+  steeringPrompt = '',
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
   const imageUrlPrefix = imageUrlPrefixFor(topicId, examId)
   const draftAudit = String(programmaticFeedback || '').trim() || 'No programmatic draft audit was provided.'
+  const steeringBlock = examSteeringPromptBlock(steeringPrompt)
 
   return `
 Review and repair this draft TurboLearner exam. Return the corrected final exam JSON.
@@ -96,6 +102,8 @@ Output contract:
 - If you introduce a new image question, generate/copy a PNG/JPEG into the asset directory and reference it as <image>${imageUrlPrefix}filename.png</image>.
 - Final JSON must pass every shared guideline below.
 - Resolve every blocking issue in the Programmatic draft audit before writing final JSON. These checks run again after review.
+
+${steeringBlock}
 
 ${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
@@ -131,6 +139,17 @@ ${JSON.stringify(promptContext.coverageProfile, null, 2)}
 
 Course source manifest:
 ${sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles })}
+`.trim()
+}
+
+function examSteeringPromptBlock(steeringPrompt) {
+  const text = String(steeringPrompt || '').trim()
+  if (!text) return ''
+  return `
+User exam steering prompt:
+Treat the following learner instructions as high-priority direction for this generated exam's focus, style, difficulty, phrasing, and option construction, unless they conflict with the output contract, schema validity, source grounding, image asset requirements, or duplicate-avoidance rules.
+
+${text}
 `.trim()
 }
 

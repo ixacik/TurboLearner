@@ -3,6 +3,7 @@ import Database from 'better-sqlite3'
 import express from 'express'
 import fs from 'node:fs'
 import multer from 'multer'
+import os from 'node:os'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
@@ -16,6 +17,7 @@ import {
   buildExamReviewPrompt,
   createExamGenerationPromptContext,
 } from './examGenerationHelpers.mjs'
+import { buildQuestionSetLatex, sanitizePdfFileName } from './examPdfExport.mjs'
 import {
   extractSourceFile,
   inferSourceKind,
@@ -51,6 +53,7 @@ const defaultTopicEmoji = '🧠'
 const allQuestionsSetId = 'all-questions'
 const weakSpotsSetId = 'weak-spots'
 const examGenerationTurnTimeoutMs = Number(process.env.TURBOLEARNER_EXAM_GENERATION_TURN_TIMEOUT_MS || 20 * 60 * 1000)
+const maxExamSteeringPromptLength = 8000
 
 const tutorThreads = new Map()
 const tutorTurns = new Map()
@@ -169,6 +172,42 @@ app.get('/api/topics/:topicId/question-bank', (req, res) => {
     res.json(topicQuestionBank(topicId))
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.get('/api/topics/:topicId/question-sets/:setId/export.pdf', async (req, res) => {
+  let exportDir = null
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const setId = sanitizePathSegment(req.params.setId)
+    const set = getQuestionSet(topicId, setId)
+    if (!set) {
+      res.status(404).send('Exam not found.')
+      return
+    }
+
+    const topic = publicTopic(topicId)
+    const latex = buildQuestionSetLatex({
+      set,
+      topicName: topic.name,
+      resolveImagePath: resolveLocalImagePath,
+    })
+    exportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turbolearner-exam-export-'))
+    const texPath = path.join(exportDir, 'exam.tex')
+    const pdfPath = path.join(exportDir, 'exam.pdf')
+    fs.writeFileSync(texPath, latex, 'utf8')
+    await compileLatexPdf(texPath, exportDir)
+
+    res.download(pdfPath, sanitizePdfFileName(set.title), (error) => {
+      fs.rmSync(exportDir, { recursive: true, force: true })
+      if (error && !res.headersSent) {
+        res.status(500).send(error instanceof Error ? error.message : String(error))
+      }
+    })
+    exportDir = null
+  } catch (error) {
+    if (exportDir) fs.rmSync(exportDir, { recursive: true, force: true })
+    res.status(500).send(error instanceof Error ? error.message : String(error))
   }
 })
 
@@ -298,6 +337,7 @@ app.get('/api/topics/:topicId/exam-generation', (req, res) => {
 app.post('/api/topics/:topicId/exam-generation', (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
+    const steeringPrompt = normalizeExamSteeringPrompt(req.body?.steeringPrompt)
     const sources = listTopicSources(topicId)
     if (sources.length === 0) {
       res.status(400).json({ error: 'Upload sources before generating an exam.' })
@@ -316,8 +356,9 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
       completedAt: null,
       error: null,
       resultId: null,
+      steeringPrompt,
     })
-    void generatePersistentExamForTopic(topicId, jobId)
+    void generatePersistentExamForTopic(topicId, jobId, steeringPrompt)
     res.status(202).json(publicTopicExamGenerationState(topicId))
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
@@ -784,7 +825,6 @@ function imagePathToInput(rawPath) {
 }
 
 function resolveLocalImagePath(imagePath) {
-  if (path.isAbsolute(imagePath)) return imagePath
   if (/^\/api\/generated-assets\//i.test(imagePath)) {
     const [, topicId, examId, topicFile] = imagePath.match(/^\/api\/generated-assets\/([^/]+)\/([^/]+)\/([^/]+)$/i) ?? []
     if (topicId && examId && topicFile) {
@@ -803,6 +843,7 @@ function resolveLocalImagePath(imagePath) {
   if (/^generated-assets\//i.test(imagePath)) {
     return path.join(appRoot, 'public', imagePath)
   }
+  if (path.isAbsolute(imagePath)) return imagePath
   return null
 }
 
@@ -1405,7 +1446,8 @@ function initializeDatabase() {
       started_at TEXT,
       completed_at TEXT,
       error TEXT,
-      result_id TEXT
+      result_id TEXT,
+      steering_prompt TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS exam_sessions (
@@ -1418,6 +1460,7 @@ function initializeDatabase() {
   `)
   ensureTopicSourceColumns(database)
   ensureTopicContextColumns(database)
+  ensureGenerationJobColumns(database)
   seedDefaultTopic(database)
   return database
 }
@@ -1445,6 +1488,13 @@ function ensureTopicContextColumns(database) {
   }
   if (!columns.has('log_json')) {
     database.exec("ALTER TABLE topic_contexts ADD COLUMN log_json TEXT NOT NULL DEFAULT '[]'")
+  }
+}
+
+function ensureGenerationJobColumns(database) {
+  const columns = new Set(database.prepare('PRAGMA table_info(generation_jobs)').all().map((column) => column.name))
+  if (!columns.has('steering_prompt')) {
+    database.exec("ALTER TABLE generation_jobs ADD COLUMN steering_prompt TEXT NOT NULL DEFAULT ''")
   }
 }
 
@@ -1675,6 +1725,43 @@ function getQuestionSet(topicId, setId) {
     sourcePath: row.source_path,
     questions: parseJson(row.questions_json, []),
   }
+}
+
+function compileLatexPdf(texPath, outputDir) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('xelatex', [
+      '-interaction=nonstopmode',
+      '-halt-on-error',
+      `-output-directory=${outputDir}`,
+      texPath,
+    ], {
+      cwd: appRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('Timed out while exporting exam PDF.'))
+    }, 60_000)
+    let output = ''
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString()
+    })
+    child.stderr.on('data', (chunk) => {
+      output += chunk.toString()
+    })
+    child.on('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timeout)
+      if (code === 0) {
+        resolve()
+        return
+      }
+      reject(new Error(`Failed to export exam PDF.\n${output.slice(-4000)}`))
+    })
+  })
 }
 
 function persistGeneratedExamSetForTopic(topicId, set) {
@@ -2539,18 +2626,19 @@ function legacyContextFilesForTopic(topicId) {
   }))
 }
 
-function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt, completedAt, error, resultId }) {
+function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt, completedAt, error, resultId, steeringPrompt = '' }) {
   db.prepare(`
     INSERT INTO generation_jobs (
-      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id, steering_prompt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
       phase = excluded.phase,
       log_json = excluded.log_json,
       completed_at = excluded.completed_at,
       error = excluded.error,
-      result_id = excluded.result_id
+      result_id = excluded.result_id,
+      steering_prompt = excluded.steering_prompt
   `).run(
     id,
     topicId,
@@ -2562,6 +2650,7 @@ function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt,
     completedAt,
     error,
     resultId,
+    normalizeExamSteeringPrompt(steeringPrompt),
   )
 }
 
@@ -2585,6 +2674,7 @@ function getActiveGenerationJob(topicId, type) {
     completedAt: row.completed_at,
     error: row.error,
     resultId: row.result_id,
+    steeringPrompt: row.steering_prompt ?? '',
   }
 }
 
@@ -2614,9 +2704,15 @@ function publicTopicExamGenerationState(topicId) {
     generatedExamId: job.resultId ?? null,
     generatedExamTitle: set?.title ?? null,
     questionCount: set?.questions?.length ?? 0,
+    steeringPrompt: job.steeringPrompt ?? '',
     log: normalizeExamGenerationLog(job.log),
     error: job.error ?? null,
   }
+}
+
+function normalizeExamSteeringPrompt(value) {
+  if (typeof value !== 'string') return ''
+  return value.trim().slice(0, maxExamSteeringPromptLength)
 }
 
 function setTopicExamGenerationPhase(topicId, jobId, phase) {
@@ -2886,6 +2982,7 @@ function emptyExamGenerationState() {
     generatedExamId: null,
     generatedExamTitle: null,
     questionCount: 0,
+    steeringPrompt: '',
     log: [],
     error: null,
   }
@@ -3147,7 +3244,7 @@ async function generatePersistentContextForTopic(topicId, jobId) {
   }
 }
 
-async function generatePersistentExamForTopic(topicId, jobId) {
+async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '') {
   const examId = `generated-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`
   const examAssetDir = path.join(topicPath(topicId), 'generated-assets', examId)
   try {
@@ -3176,6 +3273,7 @@ async function generatePersistentExamForTopic(topicId, jobId) {
       sourceManifest,
       failedFiles,
       promptContext,
+      steeringPrompt,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
@@ -3194,6 +3292,7 @@ async function generatePersistentExamForTopic(topicId, jobId) {
       promptContext,
       draftSet,
       programmaticFeedback: programmaticFeedback.text,
+      steeringPrompt,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
@@ -3235,6 +3334,7 @@ async function generateExamDraftWithCodex(jobId, {
   failedFiles,
   promptContext,
   codeExampleFiles = [],
+  steeringPrompt = '',
 }) {
   return runExamCodexTurn(jobId, {
     topicId,
@@ -3256,6 +3356,7 @@ When an output path is provided, write the draft question set JSON to that file 
       failedFiles,
       promptContext,
       codeExampleFiles,
+      steeringPrompt,
     }),
   })
 }
@@ -3273,6 +3374,7 @@ async function reviewAndRepairGeneratedExamWithCodex(jobId, {
   codeExampleFiles = [],
   draftSet,
   programmaticFeedback = null,
+  steeringPrompt = '',
 }) {
   return runExamCodexTurn(jobId, {
     topicId,
@@ -3299,6 +3401,7 @@ When an output path is provided, write the corrected final question set JSON to 
       codeExampleFiles,
       draftSet,
       programmaticFeedback,
+      steeringPrompt,
     }),
   })
 }
