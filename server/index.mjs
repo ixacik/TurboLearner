@@ -27,6 +27,11 @@ import {
   sanitizeRelativePath,
   shouldSkipFolderSource,
 } from './sourceExtraction.mjs'
+import {
+  summarizeSourceCorpus,
+  topicSourceCorpusPath,
+  writeSourceCorpus,
+} from './sourceCorpus.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appRoot = path.resolve(__dirname, '..')
@@ -256,6 +261,7 @@ app.post('/api/topics/:topicId/sources/files', uploadTopicSources.array('files',
       const storedSource = await storeTopicSourceUpload(topicId, file, requestedKind)
       if (storedSource.contextEligible) shouldRefreshContext = true
     }
+    rebuildTopicSourceCorpus(topicId)
     if (shouldRefreshContext) queueTopicContextRefresh(topicId)
     res.status(201).json({ sources: listTopicSources(topicId), context: publicTopicContextState(topicId) })
   } catch (error) {
@@ -267,6 +273,7 @@ app.delete('/api/topics/:topicId/sources/:sourceId', (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
     const deletedSource = deleteTopicSource(topicId, req.params.sourceId)
+    rebuildTopicSourceCorpus(topicId)
     if (deletedSource.contextEligible) queueTopicContextRefresh(topicId)
     res.json({ sources: listTopicSources(topicId), context: publicTopicContextState(topicId) })
   } catch (error) {
@@ -334,6 +341,25 @@ app.get('/api/topics/:topicId/exam-generation', (req, res) => {
   }
 })
 
+app.get('/api/topics/:topicId/exam-generation/log', (req, res) => {
+  try {
+    const topicId = requireTopicId(req.params.topicId)
+    const job = getActiveGenerationJob(topicId, 'exam')
+    const logPath = safeTopicGenerationLogPath(topicId, job?.logPath)
+    if (!logPath || !fs.existsSync(logPath)) {
+      res.status(404).json({ error: 'Generation log not found.' })
+      return
+    }
+    res.sendFile(logPath, (error) => {
+      if (error && !res.headersSent) {
+        res.status(500).json({ error: error.message })
+      }
+    })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
 app.post('/api/topics/:topicId/exam-generation', (req, res) => {
   try {
     const topicId = requireTopicId(req.params.topicId)
@@ -344,6 +370,9 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
       return
     }
     const jobId = randomUUID()
+    const examId = nextGeneratedExamId()
+    const logPath = topicExamGenerationLogPath(topicId, jobId, examId)
+    const initialLogEntry = examGenerationLogEntry('status', 'Queued exam generation.')
     topicExamGenerationJobs.set(topicId, jobId)
     upsertGenerationJob({
       id: jobId,
@@ -351,14 +380,30 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
       type: 'exam',
       status: 'processing',
       phase: 'Queued',
-      log: [examGenerationLogEntry('status', 'Queued exam generation.')],
+      log: [initialLogEntry],
       startedAt: new Date().toISOString(),
       completedAt: null,
       error: null,
       resultId: null,
       steeringPrompt,
+      logPath,
     })
-    void generatePersistentExamForTopic(topicId, jobId, steeringPrompt)
+    appendPersistentGenerationLog(logPath, {
+      type: 'job_started',
+      topicId,
+      jobId,
+      examId,
+      phase: 'Queued',
+      steeringPrompt,
+    })
+    appendPersistentGenerationLog(logPath, {
+      type: 'ui_log',
+      topicId,
+      jobId,
+      examId,
+      entry: initialLogEntry,
+    })
+    void generatePersistentExamForTopic(topicId, jobId, steeringPrompt, examId)
     res.status(202).json(publicTopicExamGenerationState(topicId))
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
@@ -1447,7 +1492,8 @@ function initializeDatabase() {
       completed_at TEXT,
       error TEXT,
       result_id TEXT,
-      steering_prompt TEXT NOT NULL DEFAULT ''
+      steering_prompt TEXT NOT NULL DEFAULT '',
+      log_path TEXT
     );
 
     CREATE TABLE IF NOT EXISTS exam_sessions (
@@ -1495,6 +1541,9 @@ function ensureGenerationJobColumns(database) {
   const columns = new Set(database.prepare('PRAGMA table_info(generation_jobs)').all().map((column) => column.name))
   if (!columns.has('steering_prompt')) {
     database.exec("ALTER TABLE generation_jobs ADD COLUMN steering_prompt TEXT NOT NULL DEFAULT ''")
+  }
+  if (!columns.has('log_path')) {
+    database.exec('ALTER TABLE generation_jobs ADD COLUMN log_path TEXT')
   }
 }
 
@@ -1684,6 +1733,7 @@ function topicQuestionBank(topicId) {
     }))
   return {
     schema: baseBank.schema ?? null,
+    courseContext: getTopicContext(topicId).injected_prompt ?? '',
     generatedAt: new Date().toISOString(),
     sets,
   }
@@ -2132,6 +2182,7 @@ async function migrateLegacyContextSourcesForDefaultTopic() {
     error: contextState.error,
     jobId: null,
   })
+  rebuildTopicSourceCorpus(defaultTopicId)
 }
 
 function findLegacyContextUpload(file) {
@@ -2368,6 +2419,22 @@ function topicSourceRows(topicId, status = null, sourceKind = null) {
   `).all(...params)
 }
 
+function rebuildTopicSourceCorpus(topicId) {
+  const topicDir = topicPath(topicId)
+  const sources = topicSourceRows(topicId, 'ready')
+    .filter((row) => row.extracted_text_path && fs.existsSync(row.extracted_text_path))
+    .map((row) => ({
+      id: row.id,
+      name: row.original_name,
+      relativePath: row.relative_path || '',
+      extension: row.extension || '',
+      text: fs.readFileSync(row.extracted_text_path, 'utf8'),
+    }))
+    .filter((source) => source.text.trim())
+
+  return writeSourceCorpus({ topicId, topicDir, sources })
+}
+
 function topicContextSourceRows(topicId, status = null) {
   return topicSourceRows(topicId, status).filter((row) => isTopicContextSource({
     extension: row.extension,
@@ -2464,17 +2531,11 @@ function prepareTopicExamSourceManifest(topicId, examAssetDir) {
     .filter((row) => row.stored_path && fs.existsSync(row.stored_path))
   if (rows.length === 0) return null
 
+  const corpusSummary = rebuildTopicSourceCorpus(topicId)
   fs.rmSync(materialDir, { recursive: true, force: true })
   fs.mkdirSync(materialDir, { recursive: true })
 
-  const manifest = {
-    root: materialDir,
-    instructions: 'Use these filesystem paths directly. Inspect only the source files needed to ground the exam.',
-    lectureFiles: [],
-    assignmentFolders: [],
-    codeFiles: [],
-  }
-  const folderMap = new Map()
+  const availableSources = []
   const usedTargets = new Set()
 
   for (const row of rows) {
@@ -2488,34 +2549,35 @@ function prepareTopicExamSourceManifest(topicId, examAssetDir) {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true })
     fs.copyFileSync(row.stored_path, targetPath)
 
-    const entry = {
+    availableSources.push({
       name: row.original_name,
       relativePath,
-      path: targetPath,
       extension: row.extension,
       size: Number(row.size) || 0,
       sourceKind,
-    }
-
-    if (isFolderUpload) {
-      const folderName = relativePath.split('/')[0]
-      const folderPath = path.join(materialDir, 'folders', folderName)
-      const folder = folderMap.get(folderName) || {
-        name: folderName,
-        path: folderPath,
-        files: [],
-      }
-      folder.files.push(entry)
-      folderMap.set(folderName, folder)
-    } else if (sourceKind === 'code-example') {
-      manifest.codeFiles.push(entry)
-    } else {
-      manifest.lectureFiles.push(entry)
-    }
+      archivedForProvenance: true,
+    })
   }
 
-  manifest.assignmentFolders = [...folderMap.values()]
-  return manifest
+  return {
+    sourceAccessMode: 'internal-search-only',
+    instructions: 'Use only the internal search command below for course-source grounding. Do not inspect source files directly.',
+    internalSearch: {
+      commandTemplate: `node scripts/searchTopicSource.mjs ${topicId} "<regex>" --context 20 --limit 30`,
+      topicId,
+      corpus: {
+        exists: corpusSummary.exists,
+        sourceCount: corpusSummary.sourceCount,
+        lineCount: corpusSummary.lineCount,
+        sizeBytes: corpusSummary.sizeBytes,
+      },
+    },
+    archive: {
+      copiedForProvenance: true,
+      sourceCount: rows.length,
+    },
+    availableSources,
+  }
 }
 
 function uniqueManifestFileName(originalName, sourceId, usedTargets) {
@@ -2626,11 +2688,11 @@ function legacyContextFilesForTopic(topicId) {
   }))
 }
 
-function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt, completedAt, error, resultId, steeringPrompt = '' }) {
+function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt, completedAt, error, resultId, steeringPrompt = '', logPath = null }) {
   db.prepare(`
     INSERT INTO generation_jobs (
-      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id, steering_prompt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id, steering_prompt, log_path
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
       phase = excluded.phase,
@@ -2638,7 +2700,8 @@ function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt,
       completed_at = excluded.completed_at,
       error = excluded.error,
       result_id = excluded.result_id,
-      steering_prompt = excluded.steering_prompt
+      steering_prompt = excluded.steering_prompt,
+      log_path = excluded.log_path
   `).run(
     id,
     topicId,
@@ -2651,6 +2714,7 @@ function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt,
     error,
     resultId,
     normalizeExamSteeringPrompt(steeringPrompt),
+    typeof logPath === 'string' && logPath.trim() ? logPath : null,
   )
 }
 
@@ -2675,6 +2739,7 @@ function getActiveGenerationJob(topicId, type) {
     error: row.error,
     resultId: row.result_id,
     steeringPrompt: row.steering_prompt ?? '',
+    logPath: row.log_path ?? null,
   }
 }
 
@@ -2706,6 +2771,8 @@ function publicTopicExamGenerationState(topicId) {
     questionCount: set?.questions?.length ?? 0,
     steeringPrompt: job.steeringPrompt ?? '',
     log: normalizeExamGenerationLog(job.log),
+    logPath: publicGenerationLogPath(job.logPath),
+    logUrl: job.logPath ? `/api/topics/${encodeURIComponent(topicId)}/exam-generation/log` : null,
     error: job.error ?? null,
   }
 }
@@ -2719,18 +2786,33 @@ function setTopicExamGenerationPhase(topicId, jobId, phase) {
   if (topicExamGenerationJobs.get(topicId) !== jobId) return
   const job = getActiveGenerationJob(topicId, 'exam')
   if (!job) return
-  upsertGenerationJob({ ...job, status: 'processing', phase, log: [...job.log, examGenerationLogEntry('status', phase)] })
+  const entry = examGenerationLogEntry('status', phase)
+  upsertGenerationJob({ ...job, status: 'processing', phase, log: appendExamGenerationLogEntry(job.log, entry) })
+  appendPersistentGenerationLog(job.logPath, {
+    type: 'ui_log',
+    topicId,
+    jobId,
+    entry,
+  })
 }
 
 function appendTopicExamGenerationLog(topicId, jobId, kind, message, detail = '') {
   if (topicExamGenerationJobs.get(topicId) !== jobId) return
-  const text = String(message || '').trim()
-  if (!text) return
+  const rawText = String(message ?? '')
+  const text = kind === 'assistant' ? rawText : rawText.trim()
+  if (kind === 'assistant' ? !rawText : !text) return
   const job = getActiveGenerationJob(topicId, 'exam')
   if (!job) return
+  const entry = examGenerationLogEntry(kind, text, detail)
   upsertGenerationJob({
     ...job,
-    log: [...job.log, examGenerationLogEntry(kind, text, detail)].slice(-400),
+    log: appendExamGenerationLogEntry(job.log, entry),
+  })
+  appendPersistentGenerationLog(job.logPath, {
+    type: 'ui_log',
+    topicId,
+    jobId,
+    entry,
   })
 }
 
@@ -2738,10 +2820,21 @@ function completeTopicExamGenerationJob(topicId, jobId, patch) {
   if (topicExamGenerationJobs.get(topicId) !== jobId) return
   const job = getActiveGenerationJob(topicId, 'exam')
   if (!job) return
+  const completedAt = patch.completedAt ?? new Date().toISOString()
   upsertGenerationJob({
     ...job,
     ...patch,
-    completedAt: patch.completedAt ?? new Date().toISOString(),
+    completedAt,
+  })
+  appendPersistentGenerationLog(job.logPath, {
+    type: 'job_updated',
+    topicId,
+    jobId,
+    status: patch.status ?? job.status,
+    phase: patch.phase ?? job.phase,
+    completedAt,
+    error: patch.error ?? null,
+    resultId: patch.resultId ?? job.resultId ?? null,
   })
 }
 
@@ -2984,6 +3077,8 @@ function emptyExamGenerationState() {
     questionCount: 0,
     steeringPrompt: '',
     log: [],
+    logPath: null,
+    logUrl: null,
     error: null,
   }
 }
@@ -3005,6 +3100,8 @@ function publicExamGenerationState() {
     generatedExamId: examGenerationState.generatedExamId ?? null,
     generatedExamTitle: examGenerationState.generatedExamTitle ?? null,
     questionCount: Number(examGenerationState.questionCount) || 0,
+    logPath: typeof examGenerationState.logPath === 'string' ? examGenerationState.logPath : null,
+    logUrl: typeof examGenerationState.logUrl === 'string' ? examGenerationState.logUrl : null,
     log: normalizeExamGenerationLog(examGenerationState.log),
     error: typeof examGenerationState.error === 'string' ? examGenerationState.error : null,
   }
@@ -3021,14 +3118,13 @@ function setExamGenerationPhase(jobId, phase) {
 
 function appendExamGenerationLog(jobId, kind, message, detail = '') {
   if (jobId !== examGenerationJobId) return
-  const text = String(message || '').trim()
-  if (!text) return
+  const rawText = String(message ?? '')
+  const text = kind === 'assistant' ? rawText : rawText.trim()
+  if (kind === 'assistant' ? !rawText : !text) return
+  const entry = examGenerationLogEntry(kind, text, detail)
   examGenerationState = {
     ...examGenerationState,
-    log: [
-      ...(Array.isArray(examGenerationState.log) ? examGenerationState.log : []),
-      examGenerationLogEntry(kind, text, detail),
-    ].slice(-400),
+    log: appendExamGenerationLogEntry(examGenerationState.log, entry),
   }
   persistExamGenerationState()
 }
@@ -3056,7 +3152,78 @@ function normalizeExamGenerationLog(log) {
       message: typeof entry?.message === 'string' ? entry.message : '',
       detail: typeof entry?.detail === 'string' ? entry.detail : '',
     }
-  }).filter((entry) => entry.message.trim())
+  }).filter((entry) => (entry.kind === 'assistant' ? entry.message.length > 0 : entry.message.trim()))
+}
+
+function appendExamGenerationLogEntry(log, entry) {
+  const normalized = normalizeExamGenerationLog(log)
+  const safeEntry = normalizeExamGenerationLog([entry])[0]
+  if (!safeEntry) return normalized
+  const previous = normalized.at(-1)
+  if (safeEntry.kind === 'assistant' && previous?.kind === 'assistant') {
+    return [
+      ...normalized.slice(0, -1),
+      {
+        ...previous,
+        at: safeEntry.at,
+        message: `${previous.message}${safeEntry.message}`,
+        detail: [previous.detail, safeEntry.detail].filter(Boolean).join('\n'),
+      },
+    ].slice(-400)
+  }
+  return [...normalized, safeEntry].slice(-400)
+}
+
+function nextGeneratedExamId() {
+  return `generated-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`
+}
+
+function topicExamGenerationLogPath(topicId, jobId, examId) {
+  const safeTopicId = sanitizePathSegment(topicId)
+  const safeJobId = sanitizePathSegment(jobId)
+  const safeExamId = sanitizePathSegment(examId)
+  return path.join(topicPath(safeTopicId), 'generation-logs', `${safeExamId}-${safeJobId}.jsonl`)
+}
+
+function publicGenerationLogPath(logPath) {
+  if (typeof logPath !== 'string' || !logPath.trim()) return null
+  const relativePath = path.relative(appRoot, logPath)
+  return relativePath.startsWith('..') ? logPath : relativePath
+}
+
+function safeTopicGenerationLogPath(topicId, logPath) {
+  if (typeof logPath !== 'string' || !logPath.trim()) return null
+  const root = path.resolve(topicPath(topicId), 'generation-logs')
+  const resolved = path.resolve(logPath)
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return null
+  return resolved
+}
+
+function appendPersistentGenerationLog(logPath, event) {
+  if (typeof logPath !== 'string' || !logPath.trim()) return
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true })
+    fs.appendFileSync(logPath, `${stringifyJsonLine({
+      at: new Date().toISOString(),
+      ...event,
+    })}\n`)
+  } catch (error) {
+    console.warn('[exam-generation-log] failed to append persistent log', {
+      logPath,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+function stringifyJsonLine(value) {
+  const seen = new WeakSet()
+  return JSON.stringify(value, (_key, nestedValue) => {
+    if (typeof nestedValue === 'bigint') return nestedValue.toString()
+    if (!nestedValue || typeof nestedValue !== 'object') return nestedValue
+    if (seen.has(nestedValue)) return '[Circular]'
+    seen.add(nestedValue)
+    return nestedValue
+  })
 }
 
 function mergedQuestionBank() {
@@ -3244,8 +3411,7 @@ async function generatePersistentContextForTopic(topicId, jobId) {
   }
 }
 
-async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '') {
-  const examId = `generated-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`
+async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '', examId = nextGeneratedExamId()) {
   const examAssetDir = path.join(topicPath(topicId), 'generated-assets', examId)
   try {
     setTopicExamGenerationPhase(topicId, jobId, 'Reading topic sources')
@@ -3260,8 +3426,17 @@ async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '
       ].filter(Boolean).join('\n'))
     }
 
+    const topicContext = getTopicContext(topicId)
+    if (topicContext.status !== 'ready' || !String(topicContext.injected_prompt || '').trim()) {
+      throw new Error('Generate the course context before generating an exam. The context is required as the coverage map.')
+    }
     const baseBank = topicQuestionBank(topicId)
     const promptContext = createExamGenerationPromptContext(baseBank)
+    const auditContext = {
+      ...promptContext,
+      requireSourceEvidence: true,
+      sourceAccessMode: 'internal-search-only',
+    }
     const draftOutputPath = path.join(examAssetDir, 'draft-question-set.json')
     const finalOutputPath = path.join(examAssetDir, 'final-question-set.json')
     setTopicExamGenerationPhase(topicId, jobId, 'Generating draft exam')
@@ -3278,7 +3453,7 @@ async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
     const draftSet = readGeneratedQuestionSetFile(draftOutputPath)
-    const programmaticFeedback = buildGeneratedExamProgrammaticFeedback(draftSet)
+    const programmaticFeedback = buildGeneratedExamProgrammaticFeedback(draftSet, auditContext)
     appendTopicExamGenerationLog(topicId, jobId, 'status', programmaticFeedbackLogMessage(programmaticFeedback), programmaticFeedback.text)
     setTopicExamGenerationPhase(topicId, jobId, 'Reviewing and repairing draft exam')
     await reviewAndRepairGeneratedExamWithCodex(jobId, {
@@ -3300,6 +3475,11 @@ async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '
     const rawSet = readGeneratedQuestionSetFile(finalOutputPath)
     const normalizedSet = normalizeGeneratedQuestionSet(rawSet, examId, topicId)
     validateGeneratedExamAssets(normalizedSet, examId, topicId)
+    const finalFeedback = buildGeneratedExamProgrammaticFeedback(normalizedSet, auditContext)
+    appendTopicExamGenerationLog(topicId, jobId, 'status', programmaticFeedbackLogMessage(finalFeedback), finalFeedback.text)
+    if (finalFeedback.hasIssues) {
+      throw new Error(`Reviewed exam failed final programmatic audit.\n${finalFeedback.text}`)
+    }
     persistGeneratedExamSetForTopic(topicId, normalizedSet)
 
     completeTopicExamGenerationJob(topicId, jobId, {
@@ -3344,6 +3524,7 @@ You generate high-quality TurboLearner exam question set drafts from course lect
 For image-based questions, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available.
 Built-in image generation saves images under $CODEX_HOME/generated_images by default; copy the selected PNG/JPEG into the requested exam asset directory before returning JSON.
 You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
+When an internal source search command is provided, it is the only allowed way to inspect course source material. Do not directly read source PDFs, extracted text files, copied source-material files, or context-source-material files.
 When an output path is provided, write the draft question set JSON to that file yourself. Keep the final chat response brief.
 `.trim(),
     prompt: buildExamDraftGenerationPrompt({
@@ -3381,11 +3562,12 @@ async function reviewAndRepairGeneratedExamWithCodex(jobId, {
     phaseLabel: 'Review',
     developerInstructions: `
 You are a strict TurboLearner exam reviewer and editor.
-Review the draft against lecture material, real-exam style examples, and all prior-exam coverage history.
+Review the draft against retrieved lecture evidence, real-exam style examples, and the course context coverage map.
 Use the Programmatic draft audit in the user prompt as concrete app feedback.
 Rewrite, replace, and repair the draft directly. Do not merely critique it.
 For any new image-based replacement question, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available, then copy the selected PNG/JPEG into the requested exam asset directory.
 You may run local commands to inspect/copy generated images and verify generated assets, but do not browse the web and do not call third-party APIs from shell scripts.
+When an internal source search command is provided, it is the only allowed way to inspect course source material. Do not directly read source PDFs, extracted text files, copied source-material files, or context-source-material files.
 When an output path is provided, write the corrected final question set JSON to that file yourself. Keep the final chat response brief.
 `.trim(),
     prompt: buildExamReviewPrompt({
@@ -3422,6 +3604,24 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
     developerInstructions,
   })
   if (!isExamJobCurrent(topicId, jobId)) return ''
+  const topicJob = topicId ? getActiveGenerationJob(topicId, 'exam') : null
+  const persistentLogPath = topicJob?.logPath ?? null
+  appendPersistentGenerationLog(persistentLogPath, {
+    type: 'codex_thread_started',
+    topicId,
+    jobId,
+    phaseLabel,
+    threadId: thread.thread.id,
+    developerInstructions,
+  })
+  appendPersistentGenerationLog(persistentLogPath, {
+    type: 'codex_turn_input',
+    topicId,
+    jobId,
+    phaseLabel,
+    threadId: thread.thread.id,
+    input: [{ type: 'text', text: prompt, text_elements: [] }],
+  })
   if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'status', `${phaseLabel} Codex thread: ${thread.thread.id}`)
   else {
     examGenerationState = {
@@ -3433,6 +3633,7 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
   }
 
   let markdown = ''
+  const sourceAccessViolations = []
   await codex.startTurn({
     threadId: thread.thread.id,
     input: [{ type: 'text', text: prompt, text_elements: [] }],
@@ -3441,6 +3642,15 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
     sandboxPolicy: { type: 'workspaceWrite', networkAccess: false },
     timeoutMs: examGenerationTurnTimeoutMs,
     onNotification: (message) => {
+      appendPersistentGenerationLog(persistentLogPath, {
+        type: 'codex_notification',
+        topicId,
+        jobId,
+        phaseLabel,
+        threadId: thread.thread.id,
+        method: message.method,
+        params: message.params ?? null,
+      })
       if (message.method === 'item/agentMessage/delta') {
         const delta = message.params?.delta ?? ''
         markdown += delta
@@ -3448,16 +3658,43 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
         else appendExamGenerationLog(jobId, 'assistant', delta)
       }
       if (message.method === 'item/started') {
+        const violation = forbiddenExamSourceAccessMessage(message.params?.item)
+        if (topicId && violation) sourceAccessViolations.push(violation)
         if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
         else appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
       }
       if (message.method === 'item/completed') {
+        const violation = forbiddenExamSourceAccessMessage(message.params?.item)
+        if (topicId && violation) sourceAccessViolations.push(violation)
         if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
         else appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
       }
     },
   })
 
+  if (sourceAccessViolations.length > 0) {
+    appendPersistentGenerationLog(persistentLogPath, {
+      type: 'source_access_violation',
+      topicId,
+      jobId,
+      phaseLabel,
+      threadId: thread.thread.id,
+      violations: uniqueStrings(sourceAccessViolations),
+    })
+    throw new Error([
+      'Codex attempted to inspect course source material outside the internal source search tool.',
+      ...uniqueStrings(sourceAccessViolations).slice(0, 8).map((violation) => `- ${violation}`),
+    ].join('\n'))
+  }
+
+  appendPersistentGenerationLog(persistentLogPath, {
+    type: 'codex_turn_completed',
+    topicId,
+    jobId,
+    phaseLabel,
+    threadId: thread.thread.id,
+    responseText: markdown.trim(),
+  })
   return markdown.trim()
 }
 
@@ -3479,6 +3716,27 @@ function summarizeCodexItemDetail(item) {
   if (typeof item.path === 'string') parts.push(item.path)
   if (typeof item.status === 'string') parts.push(item.status)
   return parts.filter(Boolean).join(' · ')
+}
+
+function forbiddenExamSourceAccessMessage(item) {
+  const detail = summarizeCodexItemDetail(item)
+  if (!detail || /scripts\/searchTopicSource\.mjs/.test(detail)) return ''
+  const normalized = detail.replace(/\\/g, '/')
+  const sourcePathPattern = /(?:^|\s)(?:\.?\/)?(?:\.turbolearner\/topics\/[^ ]+\/)?(?:sources|extracted|context-source-material|source-material)(?:\/|\s|$)/i
+  const generatedSourceMaterialPattern = /\.turbolearner\/topics\/[^ ]+\/generated-assets\/[^ ]+\/source-material\//i
+  const tmpExtractedPattern = /\/tmp\/[^ ]*(?:source[_-]?text|irl_source_text)[^ ]*/i
+  const sourceReadCommandPattern = /\b(?:cat|sed|rg|grep|awk|head|tail|less|more|pdftotext|python|python3|node)\b/i
+  if (
+    sourceReadCommandPattern.test(normalized) &&
+    (
+      sourcePathPattern.test(normalized) ||
+      generatedSourceMaterialPattern.test(normalized) ||
+      tmpExtractedPattern.test(normalized)
+    )
+  ) {
+    return detail.slice(0, 500)
+  }
+  return ''
 }
 
 function extractGeneratedQuestionSet(markdown) {
@@ -3561,7 +3819,23 @@ function normalizeGeneratedQuestion(question, examId, index) {
     ...(groupPrompt ? { groupPrompt } : {}),
     ...(Number.isInteger(question.groupOrder) ? { groupOrder: question.groupOrder } : {}),
     ...(Array.isArray(question.concepts) ? { concepts: question.concepts.map((concept) => stableId(concept, 'concept')).filter(Boolean) } : { concepts: [] }),
+    ...(typeof question.courseSection === 'string' && question.courseSection.trim() ? { courseSection: question.courseSection.trim() } : {}),
+    ...(Array.isArray(question.sourceSearchTerms) ? { sourceSearchTerms: question.sourceSearchTerms.map(String).map((term) => term.trim()).filter(Boolean) } : {}),
+    ...(Array.isArray(question.sourceEvidence) ? { sourceEvidence: normalizeSourceEvidence(question.sourceEvidence) } : {}),
   }
+}
+
+function normalizeSourceEvidence(entries) {
+  return entries
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => ({
+      source: nonEmptyString(entry.source ?? entry.sourceName ?? entry.file, 'source'),
+      ...(Number.isFinite(Number(entry.lineStart)) ? { lineStart: Number(entry.lineStart) } : {}),
+      ...(Number.isFinite(Number(entry.lineEnd)) ? { lineEnd: Number(entry.lineEnd) } : {}),
+      ...(Number.isFinite(Number(entry.lineNumber)) ? { lineNumber: Number(entry.lineNumber) } : {}),
+      ...(Number.isFinite(Number(entry.page)) ? { page: Number(entry.page) } : {}),
+      ...(typeof entry.note === 'string' && entry.note.trim() ? { note: entry.note.trim().slice(0, 240) } : {}),
+    }))
 }
 
 function normalizeOptions(options, questionId, type) {

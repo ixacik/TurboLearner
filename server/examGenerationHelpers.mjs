@@ -7,6 +7,7 @@ const feedbackQuestionReferenceLimit = 14
 export function createExamGenerationPromptContext(baseBank) {
   const sets = Array.isArray(baseBank?.sets) ? baseBank.sets : []
   const realExamSets = sets.filter((set) => !isGeneratedQuestionSet(set))
+  const generatedExamSets = sets.filter((set) => isGeneratedQuestionSet(set))
 
   return {
     styleExamples: {
@@ -14,7 +15,10 @@ export function createExamGenerationPromptContext(baseBank) {
       sets: realExamSets.map(styleExampleSet),
       styleMetrics: styleMetrics(realExamSets),
     },
-    coverageProfile: coverageProfile(sets),
+    realExamCoverageProfile: coverageProfile(realExamSets),
+    generatedDuplicateHistory: duplicateHistory(generatedExamSets),
+    courseContext: normalizeCourseContext(baseBank?.courseContext),
+    courseSections: courseContextSections(baseBank?.courseContext),
   }
 }
 
@@ -45,6 +49,8 @@ Output contract:
 - Write exactly one TurboLearner question set JSON object, not a full bank.
 - Save the JSON file here: ${outputPath || 'return the JSON in your final response'}.
 - If an output path is provided, create or overwrite that file yourself and keep your final chat response brief.
+- Before writing questions, create a lightweight internal coverage plan: slot, course section, depth, type, and search terms. Use it to guide the final JSON, but do not include the plan as a separate output artifact.
+- If internal source search is available, use it for every question and include sourceEvidence metadata in the JSON.
 
 ${steeringBlock}
 
@@ -56,8 +62,11 @@ ${extractionNotes}
 Real exam style examples:
 ${JSON.stringify(promptContext.styleExamples, null, 2)}
 
-Coverage history from all prior exams:
-${JSON.stringify(promptContext.coverageProfile, null, 2)}
+Real exam coverage profile:
+${JSON.stringify(promptContext.realExamCoverageProfile, null, 2)}
+
+Course context coverage map:
+${courseContextPromptBlock(promptContext)}
 
 Course source manifest:
 ${sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles })}
@@ -102,6 +111,7 @@ Output contract:
 - If you introduce a new image question, generate/copy a PNG/JPEG into the asset directory and reference it as <image>${imageUrlPrefix}filename.png</image>.
 - Final JSON must pass every shared guideline below.
 - Resolve every blocking issue in the Programmatic draft audit before writing final JSON. These checks run again after review.
+- Preserve or repair courseSection, sourceSearchTerms, and sourceEvidence metadata for every question.
 
 ${steeringBlock}
 
@@ -118,10 +128,11 @@ Review rubric:
 - Replace questions that ask what happened in the lecture, what was shown in the lecture, or what matches a lecture derivation/example.
 - Reject lecture-memorization trivia: slide-specific examples, exact classroom walkthroughs, toy numbers, professor phrasing, or derivation steps unless real exams clearly test that exact math depth.
 - Fix obvious answers, weak distractors, answer-length tells, malformed rubrics, shallow prompts, unsupported lecture claims, and inconsistent answer keys.
+- Fix weak choice options by making every distractor a plausible same-topic misconception and removing obvious length, specificity, or extreme-wording tells.
 - Substitute new questions from the selected source material when a question is too duplicated or too low quality.
 - Keep the same real-exam vibe: difficulty, phrasing, grouping, point values, type mix, and answer style.
-- Generated prior exams are coverage history only. Do not copy their style or structure.
-- Prefer unseen and underrepresented source material after accounting for all prior exams.
+- Generated prior exams are not source material, style material, or coverage inspiration. Use only programmatic duplicate warnings about them.
+- Prefer major course-context sections that are underrepresented in this draft, then ground replacements with internal source search.
 - Do not add topics that are not evidenced by the provided course sources.
 - Preserve grouping and type mix when possible, but quality and non-duplication are higher priority.
 
@@ -134,8 +145,11 @@ ${draftPath ? `Read the draft JSON from: ${draftPath}` : JSON.stringify(draftSet
 Real exam style examples:
 ${JSON.stringify(promptContext.styleExamples, null, 2)}
 
-Coverage history from all prior exams:
-${JSON.stringify(promptContext.coverageProfile, null, 2)}
+Real exam coverage profile:
+${JSON.stringify(promptContext.realExamCoverageProfile, null, 2)}
+
+Course context coverage map:
+${courseContextPromptBlock(promptContext)}
 
 Course source manifest:
 ${sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles })}
@@ -175,6 +189,8 @@ Shared question-set guidelines:
 - Include correctOptionIds legacy mirror for choice questions.
 - Avoid making correct answers longer, more specific, or stylistically different than distractors.
 - Make questions non-trivial, course-grounded, and hard to guess.
+- Choice options must be balanced: use plausible same-topic distractors, avoid absurd extremes, and avoid cue words such as "always", "never", "none", "every", "exhaustive", "guarantees", "replaces", or "impossible" unless all options are similarly balanced.
+- Hard MCQs should use near-miss options that differ by small technical details. Normal MCQs may be more direct, but their options should still be roughly equal in specificity, length, and plausibility.
 - Include grouped questions where the real exam style supports them.
 - Include code examples and image-based questions where course material supports them.
 
@@ -199,10 +215,10 @@ Shared image requirements:
 - Only put an image in a child prompt when it is specific to that subquestion and not already shown in the groupPrompt.
 
 Shared priority order:
-1. Cover selected source material that is unseen or underrepresented in the coverage profile.
-2. Count both real exams and generated exams as already-covered practice when choosing topics and angles.
+1. Use the course context coverage map to cover major testable course sections without forcing weak trivia.
+2. Use internal source search results as the grounding evidence for each question.
 3. Use only real exams for vibe: phrasing, grouping, point values, difficulty, type mix, and answer style.
-4. Do not imitate generated exams' style, phrasing, structure, option patterns, or question construction.
+4. Do not imitate generated exams' style, phrasing, structure, option patterns, or question construction; generated exams are duplicate-check history only.
 5. Do not create pure spinoffs of existing questions. If an important concept repeats, test a genuinely different lecture angle.
 
 Shared concept-understanding requirements:
@@ -217,6 +233,7 @@ Shared quality requirements:
 - Match the real exams' style, phrasing, grouping, point values, and difficulty.
 - Infer exam length and type mix from real style examples only.
 - Cover the selected source material broadly without adding topics not evidenced by sources.
+- Include courseSection, sourceSearchTerms, and sourceEvidence on every generated question when internal source search is available.
 - Repeating important concepts is allowed only when the angle is fresh and useful for spaced practice.
 - Do not clone the same surface scenario, code bug, diagram concept, numeric setup, or option pattern from any existing question.
 - Code questions should vary the implementation mistakes they test; do not repeatedly use the same precision/recall/F1 bug unless the source material makes that repetition necessary.
@@ -243,7 +260,7 @@ export function assertGeneratedMultiSelectAnswerVariety(questions) {
   )
 }
 
-export function buildGeneratedExamProgrammaticFeedback(questionSet) {
+export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext = {}) {
   const questions = Array.isArray(questionSet) ? questionSet : (
     Array.isArray(questionSet?.questions) ? questionSet.questions : []
   )
@@ -251,6 +268,9 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet) {
   const stats = generatedMultiSelectAnswerStats(questions)
   const typeCounts = sortedCounts(questions.map((question) => question?.type || 'unknown'))
   const contentSignals = generatedQuestionContentSignals(questions)
+  const sourceEvidenceAudit = generatedSourceEvidenceAudit(questions, auditContext)
+  const sectionAudit = generatedCourseSectionAudit(questions, auditContext)
+  const duplicateAudit = generatedDuplicateAudit(questions, auditContext)
 
   if (questions.length === 0) {
     issues.push({
@@ -284,6 +304,46 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet) {
     })
   }
 
+  if (sourceEvidenceAudit.missingEvidence.length > 0) {
+    issues.push({
+      code: 'missing-source-evidence',
+      message: `${sourceEvidenceAudit.missingEvidence.length} question${sourceEvidenceAudit.missingEvidence.length === 1 ? '' : 's'} lack internal-search source evidence.`,
+      detail: `Every question must include sourceEvidence from the internal search tool plus sourceSearchTerms. Affected questions: ${formatQuestionReferences(sourceEvidenceAudit.missingEvidence)}.`,
+    })
+  }
+
+  if (sectionAudit.missingCourseSection.length > 0) {
+    issues.push({
+      code: 'missing-course-section',
+      message: `${sectionAudit.missingCourseSection.length} question${sectionAudit.missingCourseSection.length === 1 ? '' : 's'} lack courseSection metadata.`,
+      detail: `Every question must declare the course context section it covers. Affected questions: ${formatQuestionReferences(sectionAudit.missingCourseSection)}.`,
+    })
+  }
+
+  if (sectionAudit.tooManyMissingSections) {
+    issues.push({
+      code: 'course-section-coverage-gap',
+      message: `${sectionAudit.missingSectionTitles.length}/${sectionAudit.expectedSectionTitles.length} course context sections are absent from the draft.`,
+      detail: `Missing sections include: ${sectionAudit.missingSectionTitles.slice(0, 10).join('; ')}. Use the course context map to cover major testable sections, merging low-yield sections into stronger questions when needed.`,
+    })
+  }
+
+  if (sectionAudit.overConcentratedSections.length > 0) {
+    issues.push({
+      code: 'course-section-overconcentration',
+      message: `Too many questions concentrate in ${sectionAudit.overConcentratedSections.map((entry) => `"${entry.section}" (${entry.count})`).join(', ')}.`,
+      detail: `Redistribute questions across course context sections while preserving real-exam style and source grounding.`,
+    })
+  }
+
+  if (duplicateAudit.matches.length > 0) {
+    issues.push({
+      code: 'generated-history-near-duplicates',
+      message: `${duplicateAudit.matches.length} question${duplicateAudit.matches.length === 1 ? '' : 's'} are too similar to prior generated exams.`,
+      detail: `Replace these angles without using generated exams as inspiration: ${duplicateAudit.matches.slice(0, feedbackQuestionReferenceLimit).map((match) => `${match.reference} similarity ${match.score.toFixed(2)} to prior generated history`).join(', ')}.`,
+    })
+  }
+
   const lines = [
     issues.length > 0
       ? `Blocking issues detected (${issues.length}):`
@@ -291,6 +351,8 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet) {
     ...issues.flatMap((issue) => [`- ${issue.message}`, `  ${issue.detail}`]),
     `Question type counts: ${formatCountMap(typeCounts)}.`,
     `Content signals: ${contentSignals.codeQuestionCount} code question(s), ${contentSignals.imageQuestionCount} image/graph question(s), ${contentSignals.groupedQuestionCount} grouped child question(s).`,
+    `Course section counts: ${formatCountMap(sectionAudit.sectionCounts)}.`,
+    `Missing source evidence: ${sourceEvidenceAudit.missingEvidence.length}.`,
     stats.total > 0
       ? `Multi-select answer-count distribution: ${formatCountMap(stats.counts)}.`
       : 'Multi-select answer-count distribution: none.',
@@ -301,6 +363,99 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet) {
     issues,
     text: lines.join('\n'),
   }
+}
+
+function generatedSourceEvidenceAudit(questions, auditContext) {
+  const requireEvidence = Boolean(auditContext?.requireSourceEvidence || auditContext?.sourceAccessMode === 'internal-search-only')
+  const missingEvidence = requireEvidence
+    ? (Array.isArray(questions) ? questions : []).filter((question) => (
+      !Array.isArray(question?.sourceEvidence) ||
+      question.sourceEvidence.length === 0 ||
+      !Array.isArray(question?.sourceSearchTerms) ||
+      question.sourceSearchTerms.length === 0
+    )).map((question) => ({
+      ...question,
+      reference: questionReference(question),
+    }))
+    : []
+
+  return { missingEvidence }
+}
+
+function generatedCourseSectionAudit(questions, auditContext) {
+  const safeQuestions = Array.isArray(questions) ? questions : []
+  const expectedSectionTitles = (Array.isArray(auditContext?.courseSections) ? auditContext.courseSections : [])
+    .map((section) => String(section?.title || '').trim())
+    .filter(Boolean)
+  const normalizedExpected = new Map(expectedSectionTitles.map((title) => [normalizeSectionTitle(title), title]))
+  const sectionCounts = sortedCounts(safeQuestions.map((question) => (
+    String(question?.courseSection || '').trim() || 'missing'
+  )))
+  const missingCourseSection = expectedSectionTitles.length > 0
+    ? safeQuestions.filter((question) => !String(question?.courseSection || '').trim()).map((question) => ({
+      ...question,
+      reference: questionReference(question),
+    }))
+    : []
+  const represented = new Set(
+    safeQuestions
+      .map((question) => normalizeSectionTitle(question?.courseSection))
+      .filter(Boolean),
+  )
+  const missingSectionTitles = [...normalizedExpected.entries()]
+    .filter(([normalized]) => !represented.has(normalized))
+    .map(([, title]) => title)
+  const tooManyMissingSections = Boolean(
+    expectedSectionTitles.length >= 4 &&
+    safeQuestions.length >= expectedSectionTitles.length &&
+    missingSectionTitles.length > Math.ceil(expectedSectionTitles.length * 0.4)
+  )
+  const maxSectionCount = Math.max(6, Math.ceil(safeQuestions.length * 0.25))
+  const overConcentratedSections = safeQuestions.length >= 12
+    ? Object.entries(sectionCounts)
+      .filter(([section, count]) => section !== 'missing' && count > maxSectionCount)
+      .map(([section, count]) => ({ section, count }))
+    : []
+
+  return {
+    sectionCounts,
+    expectedSectionTitles,
+    missingCourseSection,
+    missingSectionTitles,
+    tooManyMissingSections,
+    overConcentratedSections,
+  }
+}
+
+function generatedDuplicateAudit(questions, auditContext) {
+  const history = Array.isArray(auditContext?.generatedDuplicateHistory) ? auditContext.generatedDuplicateHistory : []
+  if (history.length === 0) return { matches: [] }
+  const matches = []
+  for (const question of Array.isArray(questions) ? questions : []) {
+    const signature = textSignature([
+      question?.groupTitle,
+      question?.groupPrompt,
+      question?.title,
+      question?.prompt,
+      ...(Array.isArray(question?.options) ? question.options.map((option) => option?.text) : []),
+    ].filter(Boolean).join(' '))
+    if (!signature) continue
+    const best = history
+      .map((candidate) => ({
+        candidate,
+        score: signatureSimilarity(signature, candidate.signature),
+      }))
+      .sort((a, b) => b.score - a.score)[0]
+    if (best && best.score >= 0.72) {
+      matches.push({
+        reference: questionReference(question),
+        score: best.score,
+        priorSetId: best.candidate.setId,
+        priorQuestionId: best.candidate.questionId,
+      })
+    }
+  }
+  return { matches }
 }
 
 function generatedMultiSelectAnswerStats(questions) {
@@ -460,6 +615,67 @@ function coverageProfile(sets) {
   }
 }
 
+function duplicateHistory(sets) {
+  return sets.flatMap((set) => (
+    Array.isArray(set?.questions) ? set.questions : []
+  ).map((question) => ({
+    setId: set.id,
+    questionId: question?.id,
+    type: question?.type,
+    concepts: Array.isArray(question?.concepts) ? question.concepts : [],
+    signature: textSignature([
+      question?.groupTitle,
+      question?.groupPrompt,
+      question?.title,
+      question?.prompt,
+      ...(Array.isArray(question?.options) ? question.options.map((option) => option?.text) : []),
+    ].filter(Boolean).join(' ')),
+  }))).filter((entry) => entry.signature)
+}
+
+function normalizeCourseContext(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function courseContextSections(value) {
+  const text = normalizeCourseContext(value)
+  if (!text) return []
+  const lines = text.split('\n')
+  const sections = []
+  let current = null
+
+  for (const line of lines) {
+    const heading = /^(#{2,4})\s+(.+?)\s*$/.exec(line)
+    if (heading && heading[1].length === 3) {
+      if (current) sections.push(trimCourseSection(current))
+      current = { title: heading[2].trim(), lines: [] }
+      continue
+    }
+    if (current) current.lines.push(line)
+  }
+  if (current) sections.push(trimCourseSection(current))
+  return sections.filter((section) => section.title && section.text)
+}
+
+function trimCourseSection(section) {
+  return {
+    title: section.title,
+    text: section.lines.join('\n').trim().slice(0, 2200),
+  }
+}
+
+function courseContextPromptBlock(promptContext) {
+  const contextText = normalizeCourseContext(promptContext?.courseContext)
+  const sections = Array.isArray(promptContext?.courseSections) ? promptContext.courseSections : []
+  if (!contextText && sections.length === 0) return 'No persistent course context is available. Use retrieved source evidence conservatively.'
+  return [
+    contextText,
+    '',
+    'Parsed course sections:',
+    JSON.stringify(sections.map((section) => section.title), null, 2),
+  ].filter(Boolean).join('\n')
+}
+
 function coverageSetSummary(set) {
   const questions = Array.isArray(set?.questions) ? set.questions : []
   return {
@@ -562,6 +778,27 @@ function textSignature(text) {
     .join(' ')
 }
 
+function normalizeSectionTitle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function signatureSimilarity(a, b) {
+  const aTokens = new Set(String(a || '').split(/\s+/).filter(Boolean))
+  const bTokens = new Set(String(b || '').split(/\s+/).filter(Boolean))
+  if (aTokens.size < 4 || bTokens.size < 4) return 0
+  let intersection = 0
+  for (const token of aTokens) {
+    if (bTokens.has(token)) intersection += 1
+  }
+  const union = new Set([...aTokens, ...bTokens]).size
+  const jaccard = union > 0 ? intersection / union : 0
+  const containment = intersection / Math.min(aTokens.size, bTokens.size)
+  return Math.max(jaccard, containment * 0.9)
+}
+
 function codeSignature(text) {
   const snippets = [...String(text ?? '').matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/gi)]
     .map((match) => match[1])
@@ -630,6 +867,23 @@ ${file.text}
 
 function sourceMaterialBlock({ sourceManifest, usableFiles, codeExampleFiles }) {
   if (sourceManifest) {
+    if (sourceManifest.sourceAccessMode === 'internal-search-only') {
+      return `${JSON.stringify(sourceManifest, null, 2)}
+
+Internal source access rules:
+- The internal search command is the ONLY allowed way to inspect course source material.
+- The search pattern is ALWAYS a JavaScript regular expression, not literal text search.
+- Use the command template from internalSearch.commandTemplate and replace <regex> with a precise regex pattern.
+- Express boundaries yourself. For example, use "Dyna\\s" or "Dyna " for Dyna followed by whitespace, "Q\\(s,\\s*a\\)" for Q(s,a), and "Monte\\s+Carlo|TD\\(0\\)" for alternatives.
+- Spaces inside quotes are preserved, including trailing spaces in patterns such as "Dyna ".
+- --limit is the maximum number of matching source snippets to display; if at least that many matches exist, that many SOURCE entries will be shown.
+- Search output is a compact sampled evidence blob when there are more matches than the limit; rerun or vary focused terms to gather additional support.
+- Do not read, cat, sed, head, tail, grep, rg, awk, Python-read, pdftotext, or otherwise inspect files under source-material, sources, extracted, or context-source-material.
+- Do not inspect raw PDFs, extracted text files, or copied source archives directly.
+- Every generated question must include courseSection, sourceSearchTerms, and sourceEvidence based on internal search results. sourceSearchTerms must list the exact regex patterns used. Prefer source/page/note evidence from the search blob; line numbers are optional.
+- If internal search returns weak evidence for a planned standalone question, revise the plan or merge that section into a stronger testable question.`
+    }
+
     return `${JSON.stringify(sourceManifest, null, 2)}
 
 Use these paths directly. You are a coding agent with filesystem access:

@@ -21,6 +21,11 @@ import {
   publicSourceFromRow,
   shouldSkipFolderSource,
 } from './sourceExtraction.mjs'
+import {
+  buildSourceCorpusText,
+  searchSourceCorpus,
+  writeSourceCorpus,
+} from './sourceCorpus.mjs'
 
 const baseBank = {
   schema: { version: 2 },
@@ -64,32 +69,45 @@ test('style examples include real exams but exclude generated exams', () => {
   assert.equal(context.styleExamples.styleMetrics.realExamCount, 1)
 })
 
-test('coverage history includes generated exams', () => {
+test('prompt context keeps generated exams out of creative coverage but records duplicate history', () => {
   const context = createExamGenerationPromptContext(baseBank)
 
   assert.deepEqual(
-    context.coverageProfile.sets.map((set) => [set.id, set.sourceRole]),
+    context.realExamCoverageProfile.sets.map((set) => [set.id, set.sourceRole]),
     [
       ['practice-exam', 'real-style-and-coverage'],
-      ['generated-20260618131230-c6923755', 'coverage-only-generated'],
     ],
   )
-  assert.equal(context.coverageProfile.conceptCounts.metrics, 1)
-  assert.equal(context.coverageProfile.conceptCounts.kernels, 1)
+  assert.equal(context.realExamCoverageProfile.conceptCounts.metrics, 1)
+  assert.equal(context.realExamCoverageProfile.conceptCounts.kernels, undefined)
+  assert.equal(context.generatedDuplicateHistory.length, 1)
+  assert.equal(context.generatedDuplicateHistory[0].setId, 'generated-20260618131230-c6923755')
 })
 
-test('draft and review prompts distinguish style examples from coverage history', () => {
-  const promptContext = createExamGenerationPromptContext(baseBank)
+test('draft and review prompts use internal source search instead of raw source paths', () => {
+  const promptContext = createExamGenerationPromptContext({
+    ...baseBank,
+    courseContext: [
+      '# Course Scope',
+      '## Covered Topics',
+      '### Metrics',
+      '- Covered: precision and recall.',
+    ].join('\n'),
+  })
   const commonArgs = {
     topicId: 'machine-learning',
     examId: 'generated-test',
     examAssetDir: '/tmp/generated-test',
     outputPath: '/tmp/generated-test/draft-question-set.json',
     sourceManifest: {
-      root: '/tmp/generated-test/source-material',
-      lectureFiles: [{ name: 'lecture.md', path: '/tmp/generated-test/source-material/lectures/lecture.md' }],
-      assignmentFolders: [{ name: 'assignments', path: '/tmp/generated-test/source-material/folders/assignments', files: [] }],
-      codeFiles: [],
+      sourceAccessMode: 'internal-search-only',
+      instructions: 'Use only the internal search command below for course-source grounding. Do not inspect source files directly.',
+      internalSearch: {
+        commandTemplate: 'node scripts/searchTopicSource.mjs machine-learning "<regex>" --context 20 --limit 30',
+        topicId: 'machine-learning',
+        corpus: { exists: true, sourceCount: 1, lineCount: 20, sizeBytes: 500 },
+      },
+      availableSources: [{ name: 'lecture.md', sourceKind: 'lecture', extension: '.md' }],
     },
     failedFiles: [],
     promptContext,
@@ -114,16 +132,23 @@ test('draft and review prompts distinguish style examples from coverage history'
   })
 
   assert.match(draftPrompt, /Real exam style examples:/)
-  assert.match(draftPrompt, /Coverage history from all prior exams:/)
+  assert.match(draftPrompt, /Real exam coverage profile:/)
+  assert.match(draftPrompt, /Course context coverage map:/)
+  assert.match(draftPrompt, /Metrics/)
   assert.match(draftPrompt, /Course source manifest:/)
-  assert.match(draftPrompt, /\/tmp\/generated-test\/source-material\/lectures\/lecture\.md/)
+  assert.match(draftPrompt, /node scripts\/searchTopicSource\.mjs machine-learning/)
+  assert.match(draftPrompt, /JavaScript regular expression, not literal text search/)
+  assert.match(draftPrompt, /replace <regex> with a precise regex pattern/)
+  assert.match(draftPrompt, /Dyna\\s/)
+  assert.match(draftPrompt, /The internal search command is the ONLY allowed way/)
+  assert.doesNotMatch(draftPrompt, /\/tmp\/generated-test\/source-material\/lectures\/lecture\.md/)
   assert.match(draftPrompt, /Save the JSON file here: \/tmp\/generated-test\/draft-question-set\.json/)
-  assert.match(draftPrompt, /Do not invent unrelated programming domains, libraries, or APIs/)
   assert.doesNotMatch(draftPrompt, /Metrics, kernels, and SVM lecture notes/)
   assert.doesNotMatch(draftPrompt, /BEGIN CODE EXAMPLE/)
   assert.match(draftPrompt, /Shared question-set guidelines:/)
   assert.match(reviewPrompt, /Shared question-set guidelines:/)
-  assert.match(draftPrompt, /Generated prior exams are coverage history only|Do not imitate generated exams' style/)
+  assert.match(draftPrompt, /generated exams are duplicate-check history only/i)
+  assert.match(draftPrompt, /courseSection, sourceSearchTerms, and sourceEvidence/)
   assert.match(draftPrompt, /Multi-select questions may have any number of correct options from exactly one through all options/)
   assert.match(draftPrompt, /All-correct and single-correct multi-select questions are valid/)
   assert.doesNotMatch(draftPrompt, /at least one incorrect option/)
@@ -131,6 +156,8 @@ test('draft and review prompts distinguish style examples from coverage history'
   assert.match(draftPrompt, /do not repeat that same <image> in child prompts/)
   assert.match(draftPrompt, /Do not ask what happened in the lecture/)
   assert.match(draftPrompt, /Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level/)
+  assert.match(draftPrompt, /Choice options must be balanced/)
+  assert.match(draftPrompt, /Hard MCQs should use near-miss options/)
   assert.match(reviewPrompt, /Review and repair this draft TurboLearner exam/)
   assert.match(reviewPrompt, /Programmatic draft audit:/)
   assert.match(reviewPrompt, /Generated multi-select answer counts are too predictable: 4\/4 use 3\/4 correct options/)
@@ -139,7 +166,7 @@ test('draft and review prompts distinguish style examples from coverage history'
   assert.match(reviewPrompt, /Read the draft JSON from: \/tmp\/generated-test\/draft-question-set\.json/)
   assert.match(reviewPrompt, /Save the corrected JSON file here: \/tmp\/generated-test\/final-question-set\.json/)
   assert.match(reviewPrompt, /Course source manifest:/)
-  assert.match(reviewPrompt, /Do not copy full assignment solutions verbatim/)
+  assert.match(reviewPrompt, /Do not inspect raw PDFs/)
   assert.match(reviewPrompt, /Do not ask what happened in the lecture/)
   assert.match(reviewPrompt, /Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level/)
   assert.match(reviewPrompt, /remove duplicate child-level <image> tags/)
@@ -147,6 +174,7 @@ test('draft and review prompts distinguish style examples from coverage history'
   assert.doesNotMatch(reviewPrompt, /where all options are correct or no options are correct/)
   assert.match(reviewPrompt, /Replace questions that ask what happened in the lecture/)
   assert.match(reviewPrompt, /Reject lecture-memorization trivia/)
+  assert.match(reviewPrompt, /Fix weak choice options/)
 })
 
 test('draft prompt falls back to text mode when no source manifest is provided', () => {
@@ -359,6 +387,146 @@ test('source kind defaults to lecture unless explicitly code-example', () => {
   }), /Language: javascript/)
 })
 
+test('source corpus generation and search return bounded context blobs', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'turbolearner-corpus-'))
+  const summary = writeSourceCorpus({
+    topicId: 'intro-rl',
+    topicDir: tmpDir,
+    sources: [
+      {
+        id: 's1',
+        name: 'Bandits.pdf',
+        relativePath: '',
+        extension: '.pdf',
+        text: 'Intro\nBandit action value uses partial feedback.\nRegret compares with best arm.',
+      },
+      {
+        id: 's2',
+        name: 'MDP.pdf',
+        relativePath: '',
+        extension: '.pdf',
+        text: 'States\nTransitions\nValues',
+      },
+    ],
+  })
+
+  assert.equal(summary.exists, true)
+  assert.equal(summary.sourceCount, 2)
+  const result = searchSourceCorpus({
+    corpusPath: summary.path,
+    query: 'partial feedback',
+    context: 1,
+    limit: 5,
+    randomize: false,
+  })
+
+  assert.equal(result.hitCount, 1)
+  assert.match(result.output, /SOURCE 1: Bandits\.pdf/)
+  assert.match(result.output, /Intro Bandit action value uses partial feedback\. Regret compares with best arm\./)
+  assert.match(result.output, /Bandit action value uses partial feedback/)
+  assert.doesNotMatch(result.output, /Intro\nBandit action value/)
+  assert.doesNotMatch(result.output, /^\s*>?\s*\d+\s+\|/m)
+  assert.doesNotMatch(result.output, /Transitions/)
+})
+
+test('source corpus search samples after collecting matches and uses raw regex patterns', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'turbolearner-corpus-'))
+  const summary = writeSourceCorpus({
+    topicId: 'intro-rl',
+    topicDir: dir,
+    sources: [{
+      id: 's1',
+      name: 'Planning.pdf',
+      relativePath: '',
+      extension: '.pdf',
+      text: [
+        'Dynamic programming introduces full sweeps.',
+        'Dyna alternates real experience and model-generated planning updates.',
+        'Dyna-Q samples simulated transitions from a learned model.',
+      ].join('\f'),
+    }],
+  })
+
+  const exact = searchSourceCorpus({
+    corpusPath: summary.path,
+    query: 'Dyna ',
+    context: 0,
+    limit: 10,
+    randomize: false,
+  })
+  assert.equal(exact.hitCount, 1)
+  assert.match(exact.output, /TurboLearner source regex: "Dyna "/)
+  assert.doesNotMatch(exact.output, /Dynamic programming/)
+  assert.match(exact.output, /Dyna alternates real experience/)
+  assert.doesNotMatch(exact.output, /Dyna-Q samples simulated transitions/)
+
+  const broad = searchSourceCorpus({
+    corpusPath: summary.path,
+    query: 'Dyna',
+    context: 0,
+    limit: 10,
+    randomize: false,
+  })
+  assert.equal(broad.hitCount, 3)
+  assert.match(broad.output, /Dynamic programming/)
+  assert.match(broad.output, /Dyna-Q samples simulated transitions/)
+})
+
+test('source corpus search limit is the maximum number of displayed hits', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'turbolearner-corpus-'))
+  const summary = writeSourceCorpus({
+    topicId: 'intro-rl',
+    topicDir: dir,
+    sources: [{
+      id: 's1',
+      name: 'Repeated.pdf',
+      relativePath: '',
+      extension: '.pdf',
+      text: ['Dyna one', 'Dyna two', 'Dyna three', 'Dyna four', 'Dyna five'].join('\f'),
+    }],
+  })
+
+  const limited = searchSourceCorpus({
+    corpusPath: summary.path,
+    query: 'Dyna ',
+    context: 0,
+    limit: 3,
+    randomize: false,
+  })
+  assert.equal(limited.totalMatchCount, 5)
+  assert.equal(limited.hitCount, 3)
+  assert.match(limited.output, /Showing 3 snippets from 5 matches \(limit 3\)\./)
+
+  const all = searchSourceCorpus({
+    corpusPath: summary.path,
+    query: 'Dyna ',
+    context: 0,
+    limit: 5,
+    randomize: false,
+  })
+  assert.equal(all.hitCount, 5)
+  assert.match(all.output, /SOURCE 5: Repeated\.pdf/)
+})
+
+test('source corpus text preserves source newlines without page markers or blank OCR gaps', () => {
+  const text = buildSourceCorpusText({
+    topicId: 'intro-rl',
+    sources: [{
+      id: 's1',
+      name: 'Slides.pdf',
+      relativePath: '',
+      extension: '.pdf',
+      text: 'Slide\n\none\n\n\nhas   gaps\fSlide\n two',
+    }],
+  })
+
+  assert.doesNotMatch(text, /@@TURBOLEARNER_PAGE/)
+  assert.match(text, /@@TURBOLEARNER_SOURCE/)
+  assert.match(text, /Slide\none\nhas gaps\nSlide\ntwo/)
+  assert.doesNotMatch(text, /Slide\n\none/)
+  assert.doesNotMatch(text, /\n\n\nhas/)
+})
+
 test('topic context sources are only non-code PDF, TXT, and MD files', () => {
   assert.equal(isTopicContextSource({ extension: '.pdf', sourceKind: 'lecture' }), true)
   assert.equal(isTopicContextSource({ extension: '.txt', sourceKind: 'lecture' }), true)
@@ -487,6 +655,70 @@ test('programmatic draft audit reports predictable multi-select patterns', () =>
   assert.match(feedback.text, /4\/4 use 3\/4 correct options/)
   assert.match(feedback.text, /generated-q1/)
   assert.match(feedback.text, /Multi-select answer-count distribution: 3\/4: 4/)
+})
+
+test('programmatic draft audit does not block subjective option-quality heuristics', () => {
+  const feedback = buildGeneratedExamProgrammaticFeedback({
+    questions: [
+      question({
+        id: 'generated-q1',
+        number: '1',
+        prompt: 'Which statement best describes the role of the critic in actor-critic methods?',
+        options: [
+          { id: 'A', text: 'It performs exhaustive tree search at every decision.' },
+          { id: 'B', text: 'It replaces the policy with a model of transition probabilities.' },
+          { id: 'C', text: 'It stores expert demonstrations for behavior cloning.' },
+          { id: 'D', text: 'It learns value estimates that assess actions or states, often with single-step TD, while the actor updates the policy.' },
+        ],
+        answer: { correctOptionIds: ['D'], expectedText: null, source: 'inferred' },
+      }),
+    ],
+  })
+
+  assert.equal(feedback.issues.some((issue) => issue.code === 'weak-choice-options'), false)
+  assert.doesNotMatch(feedback.text, /Weak choice-option/)
+})
+
+test('programmatic draft audit requires internal-search evidence when enabled', () => {
+  const feedback = buildGeneratedExamProgrammaticFeedback({
+    questions: [
+      question({
+        id: 'generated-q1',
+        courseSection: 'Model-Free Learning From Experience',
+      }),
+    ],
+  }, {
+    requireSourceEvidence: true,
+    courseSections: [{ title: 'Model-Free Learning From Experience' }],
+    generatedDuplicateHistory: [],
+  })
+
+  assert.equal(feedback.hasIssues, true)
+  assert.equal(feedback.issues.some((issue) => issue.code === 'missing-source-evidence'), true)
+  assert.match(feedback.text, /Missing source evidence: 1/)
+})
+
+test('programmatic draft audit flags near-duplicates from generated history', () => {
+  const feedback = buildGeneratedExamProgrammaticFeedback({
+    questions: [
+      question({
+        id: 'generated-q1',
+        prompt: 'A generated prompt about kernelized classifiers.',
+        options: [
+          { id: 'A', text: 'Kernel option A' },
+          { id: 'B', text: 'Kernel option B' },
+          { id: 'C', text: 'Kernel option C' },
+          { id: 'D', text: 'Kernel option D' },
+        ],
+        courseSection: 'Kernels',
+        sourceSearchTerms: ['kernelized classifiers'],
+        sourceEvidence: [{ source: 'lecture.md', lineStart: 1, lineEnd: 5 }],
+      }),
+    ],
+  }, createExamGenerationPromptContext(baseBank))
+
+  assert.equal(feedback.hasIssues, true)
+  assert.equal(feedback.issues.some((issue) => issue.code === 'generated-history-near-duplicates'), true)
 })
 
 function question(overrides = {}) {

@@ -329,6 +329,8 @@ type ExamGenerationState = {
   questionCount: number
   steeringPrompt: string
   log: ExamGenerationLogEntry[]
+  logPath: string | null
+  logUrl: string | null
   error: string | null
 }
 
@@ -446,6 +448,8 @@ const emptyExamGenerationState: ExamGenerationState = {
   questionCount: 0,
   steeringPrompt: '',
   log: [],
+  logPath: null,
+  logUrl: null,
   error: null,
 }
 const codeLanguageAliases: Record<string, string> = {
@@ -3961,6 +3965,23 @@ const ExamGenerationModal = memo(function ExamGenerationModal({
   onClear: () => void
   onClose: () => void
 }) {
+  const feedRef = useRef<HTMLDivElement>(null)
+  const shouldFollowFeedRef = useRef(true)
+  const logEntries = useMemo(() => compactExamGenerationLog(generation.log), [generation.log])
+  const latestLogEntry = logEntries.at(-1)
+
+  const handleFeedScroll = useCallback(() => {
+    const feed = feedRef.current
+    if (!feed) return
+    shouldFollowFeedRef.current = isScrolledNearBottom(feed)
+  }, [])
+
+  useLayoutEffect(() => {
+    const feed = feedRef.current
+    if (!feed || !shouldFollowFeedRef.current) return
+    feed.scrollTop = feed.scrollHeight
+  }, [latestLogEntry?.id, latestLogEntry?.message, generation.phase])
+
   return (
     <div
       className="modal-backdrop"
@@ -3991,16 +4012,15 @@ const ExamGenerationModal = memo(function ExamGenerationModal({
           {generation.startedAt && <span>Started {formatDateTime(generation.startedAt)}</span>}
           {generation.completedAt && <span>Finished {formatDateTime(generation.completedAt)}</span>}
           {generation.threadId && <span>Thread {generation.threadId}</span>}
+          {generation.logPath && (
+            <span title={generation.logPath}>
+              Raw log{' '}
+              {generation.logUrl ? (
+                <a href={generation.logUrl} target="_blank" rel="noreferrer">JSONL</a>
+              ) : generation.logPath}
+            </span>
+          )}
         </div>
-
-        <ul className="context-file-list">
-          {generation.files.map((file, index) => (
-            <li key={`${file.name}:${index}`}>
-              <span>{file.name}</span>
-              <small>{formatBytes(file.size)}</small>
-            </li>
-          ))}
-        </ul>
 
         {generation.error && <div className="error-box">{generation.error}</div>}
 
@@ -4011,9 +4031,9 @@ const ExamGenerationModal = memo(function ExamGenerationModal({
           </section>
         )}
 
-        <div className="exam-generation-feed">
-          {generation.log.length > 0 ? (
-            compactExamGenerationLog(generation.log).map((entry) => (
+        <div className="exam-generation-feed" ref={feedRef} onScroll={handleFeedScroll}>
+          {logEntries.length > 0 ? (
+            logEntries.map((entry) => (
               <div key={entry.id} className={`exam-generation-event event-${entry.kind}`}>
                 <div className="exam-generation-event-label">
                   {examGenerationEventLabel(entry)}
