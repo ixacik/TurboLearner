@@ -3,6 +3,10 @@ const maxCoverageAngles = 220
 const predictableMultiSelectDominanceRatio = 0.75
 const predictableMultiSelectMinCount = 3
 const feedbackQuestionReferenceLimit = 14
+const choiceOptionMaxLengthRatio = 1.10
+const choiceOptionMinComparableLength = 20
+const choiceOptionSpecificityMinOverlap = 4
+const choiceOptionSpecificityMinGap = 3
 const defaultExamQuestionCount = 35
 const examBlueprintBackupRatio = 0.22
 const examBlueprintMaxTargetLength = 260
@@ -249,6 +253,8 @@ Review rubric:
 - Reject lecture-memorization trivia: slide-specific examples, exact classroom walkthroughs, toy numbers, professor phrasing, or derivation steps unless real exams clearly test that exact math depth.
 - Fix obvious answers, weak distractors, answer-length tells, malformed rubrics, shallow prompts, unsupported lecture claims, and inconsistent answer keys.
 - Fix weak choice options by making every distractor a plausible same-topic misconception and removing obvious length, specificity, or extreme-wording tells.
+- For every choice question, check visible option lengths before writing final JSON; rewrite any option set where the longest option is more than 10% longer than the shortest comparable option.
+- For every choice question, check specificity balance; the correct answer must not be the only option with source-like detail, technical qualifiers, or a complete explanation.
 - Substitute new questions from the selected source material when a question is too duplicated or too low quality.
 - Keep the same real-exam vibe: difficulty, phrasing, grouping, point values, type mix, and answer style.
 - Generated prior exams are not source material, style material, or coverage inspiration. Use only programmatic duplicate warnings about them.
@@ -333,6 +339,13 @@ Shared question-set guidelines:
 - Include grouped questions where the real exam style supports them.
 - Include code examples and image-based questions where course material supports them.
 
+IMPORTANT: Choice-option balance:
+- All options in a choice question must be the same visible length within 10%.
+- All options must be equally specific, technical, and source-grounded.
+- The correct answer must not be longer, more qualified, more precise, or more source-like than the distractors.
+- Never write one detailed correct answer plus three generic or obviously false distractors.
+- If a concept needs a detailed correct statement, make every distractor a parallel near-miss statement with similar length and specificity.
+
 Shared course-code requirements:
 - Treat uploaded source text as the primary authority for concepts and coverage.
 - Use uploaded course code examples only to match programming languages, APIs, style, difficulty, implementation mistakes, and assignment scope.
@@ -412,6 +425,7 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext
   const sectionAudit = generatedCourseSectionAudit(questions, auditContext)
   const duplicateAudit = generatedDuplicateAudit(questions, auditContext)
   const blueprintAudit = generatedBlueprintAudit(questions, auditContext)
+  const weakChoiceAudit = generatedWeakChoiceOptionAudit(questions)
 
   if (questions.length === 0) {
     issues.push({
@@ -485,6 +499,15 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext
     })
   }
 
+  if (weakChoiceAudit.matches.length > 0) {
+    const questionNoun = weakChoiceAudit.matches.length === 1 ? 'question has' : 'questions have'
+    issues.push({
+      code: 'weak-choice-options',
+      message: `${weakChoiceAudit.matches.length} choice ${questionNoun} option length or specificity tells.`,
+      detail: `Affected questions: ${weakChoiceAudit.matches.slice(0, feedbackQuestionReferenceLimit).map(weakChoiceIssueDetail).join('; ')}. Rewrite all options so they are within 10% visible length, equally specific, and use parallel same-topic near-miss distractors.`,
+    })
+  }
+
   if (blueprintAudit.missingSlotMetadata.length > 0) {
     issues.push({
       code: 'blueprint-slot-missing-metadata',
@@ -551,6 +574,7 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext
     `Course section counts: ${formatCountMap(sectionAudit.sectionCounts)}.`,
     `Blueprint slot counts: ${formatCountMap(blueprintAudit.slotCounts)}.`,
     `Missing source evidence: ${sourceEvidenceAudit.missingEvidence.length}.`,
+    `Weak choice-option tells: ${weakChoiceAudit.matches.length}.`,
     stats.total > 0
       ? `Multi-select answer-count distribution: ${formatCountMap(stats.counts)}.`
       : 'Multi-select answer-count distribution: none.',
@@ -654,6 +678,119 @@ function generatedDuplicateAudit(questions, auditContext) {
     }
   }
   return { matches }
+}
+
+function generatedWeakChoiceOptionAudit(questions) {
+  const matches = []
+  for (const question of Array.isArray(questions) ? questions : []) {
+    if (!['single', 'multiple'].includes(question?.type)) continue
+    const options = Array.isArray(question?.options) ? question.options : []
+    if (options.length < 2) continue
+
+    const optionMetrics = options.map((option, index) => {
+      const id = String(option?.id ?? '').trim() || String.fromCharCode(65 + index)
+      const visibleText = visibleChoiceOptionText(option?.text)
+      return {
+        id,
+        visibleText,
+        length: visibleText.length,
+        sourceOverlap: 0,
+      }
+    })
+    const maxLength = Math.max(...optionMetrics.map((option) => option.length))
+    const minLength = Math.min(...optionMetrics.map((option) => option.length))
+    const lengthRatio = minLength > 0 ? maxLength / minLength : (maxLength > 0 ? Number.POSITIVE_INFINITY : 1)
+    const reasons = []
+
+    if (
+      maxLength >= choiceOptionMinComparableLength &&
+      lengthRatio > choiceOptionMaxLengthRatio
+    ) {
+      reasons.push(
+        `option lengths range ${minLength}-${maxLength} chars (${lengthRatio.toFixed(2)}x)`,
+      )
+    }
+
+    const correctOptionIds = generatedCorrectOptionIds(question)
+    if (correctOptionIds.length === 1) {
+      const sourceTokens = sourceSpecificityTokens(question)
+      if (sourceTokens.size > 0) {
+        for (const option of optionMetrics) {
+          option.sourceOverlap = tokenOverlap(importantTokens(option.visibleText), sourceTokens)
+        }
+        const correctMetric = optionMetrics.find((option) => option.id === correctOptionIds[0])
+        const distractorMaxOverlap = Math.max(
+          0,
+          ...optionMetrics
+            .filter((option) => option.id !== correctOptionIds[0])
+            .map((option) => option.sourceOverlap),
+        )
+        if (
+          correctMetric &&
+          correctMetric.sourceOverlap >= choiceOptionSpecificityMinOverlap &&
+          correctMetric.sourceOverlap >= distractorMaxOverlap + choiceOptionSpecificityMinGap
+        ) {
+          reasons.push(
+            `correct option ${correctMetric.id} has ${correctMetric.sourceOverlap} source-overlap terms vs distractor max ${distractorMaxOverlap}`,
+          )
+        }
+      }
+    }
+
+    if (reasons.length > 0) {
+      matches.push({
+        ...question,
+        reference: questionReference(question),
+        reasons,
+        minLength,
+        maxLength,
+        lengthRatio,
+        longestOptionIds: optionMetrics.filter((option) => option.length === maxLength).map((option) => option.id),
+        shortestOptionIds: optionMetrics.filter((option) => option.length === minLength).map((option) => option.id),
+      })
+    }
+  }
+  return { matches }
+}
+
+function weakChoiceIssueDetail(match) {
+  return `${match.reference}: ${match.reasons.join(', ')}`
+}
+
+function visibleChoiceOptionText(text) {
+  return String(text ?? '')
+    .replace(/<image>[\s\S]*?<\/image>/gi, ' image ')
+    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, '$1')
+    .replace(/<math\b[^>]*>([\s\S]*?)<\/math>/gi, '$1')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function sourceSpecificityTokens(question) {
+  const evidenceText = Array.isArray(question?.sourceEvidence)
+    ? question.sourceEvidence.map((entry) => [
+      entry?.evidence,
+      entry?.note,
+      entry?.text,
+      entry?.quote,
+      entry?.source,
+    ].filter(Boolean).join(' ')).join(' ')
+    : ''
+  return new Set(importantTokens([
+    evidenceText,
+    Array.isArray(question?.sourceSearchTerms) ? question.sourceSearchTerms.join(' ') : '',
+    question?.courseSection,
+    question?.blueprintTarget,
+  ].filter(Boolean).join(' ')))
+}
+
+function tokenOverlap(tokens, tokenSet) {
+  let count = 0
+  for (const token of uniqueStrings(tokens)) {
+    if (tokenSet.has(token)) count += 1
+  }
+  return count
 }
 
 function generatedBlueprintAudit(questions, auditContext) {

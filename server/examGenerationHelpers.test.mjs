@@ -160,6 +160,9 @@ test('draft and review prompts use internal source search instead of raw source 
   assert.match(draftPrompt, /Do not ask what happened in the lecture/)
   assert.match(draftPrompt, /Only include formula manipulation, derivations, or exact feature mappings when real exam examples clearly use that same level/)
   assert.match(draftPrompt, /Choice options must be balanced/)
+  assert.match(draftPrompt, /IMPORTANT: Choice-option balance:/)
+  assert.match(draftPrompt, /same visible length within 10%/)
+  assert.match(draftPrompt, /Never write one detailed correct answer plus three generic/)
   assert.match(draftPrompt, /Hard MCQs should use near-miss options/)
   assert.match(reviewPrompt, /Review and repair this draft TurboLearner exam/)
   assert.match(reviewPrompt, /Programmatic draft audit:/)
@@ -178,6 +181,8 @@ test('draft and review prompts use internal source search instead of raw source 
   assert.match(reviewPrompt, /Replace questions that ask what happened in the lecture/)
   assert.match(reviewPrompt, /Reject lecture-memorization trivia/)
   assert.match(reviewPrompt, /Fix weak choice options/)
+  assert.match(reviewPrompt, /longest option is more than 10% longer/)
+  assert.match(reviewPrompt, /correct answer must not be the only option with source-like detail/)
 })
 
 test('draft prompt falls back to text mode when no source manifest is provided', () => {
@@ -932,26 +937,91 @@ test('programmatic draft audit reports predictable multi-select patterns', () =>
   assert.match(feedback.text, /Multi-select answer-count distribution: 3\/4: 4/)
 })
 
-test('programmatic draft audit does not block subjective option-quality heuristics', () => {
+test('programmatic draft audit flags weak choice options when the correct answer stands out', () => {
+  const feedback = buildGeneratedExamProgrammaticFeedback({
+    questions: [
+      question({
+        id: 'generated-q1',
+        number: '20',
+        prompt: 'Why does the Temporal Difference model explain higher-order reinforcement better than the Rescorla-Wagner model in the course discussion?',
+        options: [
+          { id: 'A', text: 'It uses direct reward-only updates instead of prediction errors.' },
+          { id: 'B', text: 'It adds the expected cumulative value of the next state, so a predictor of future reward can itself drive learning.' },
+          { id: 'C', text: 'It removes state values and learns only a fixed stimulus-response mapping.' },
+          { id: 'D', text: 'It assumes the reward is observed before the predictor state.' },
+        ],
+        answer: { correctOptionIds: ['B'], expectedText: null, source: 'inferred' },
+        courseSection: 'Psychology And Neuroscience Connections',
+        sourceSearchTerms: [
+          'Rescorla|extinction|satiation|higher.?order|dopamine|reward.?prediction',
+        ],
+        sourceEvidence: [
+          {
+            source: 'IRL_Psychology_Neuroscience.pdf',
+            evidence: 'The psychology lecture says Rescorla-Wagner considers immediate reward expectation, while TD adds the expected cumulative value of the next state and can explain secondary reinforcers.',
+          },
+        ],
+      }),
+    ],
+  })
+
+  assert.equal(feedback.hasIssues, true)
+  assert.equal(feedback.issues.some((issue) => issue.code === 'weak-choice-options'), true)
+  assert.match(feedback.text, /option lengths range/)
+  assert.match(feedback.text, /source-overlap terms/)
+  assert.match(feedback.text, /Weak choice-option tells: 1/)
+})
+
+test('programmatic draft audit flags choice options that differ by more than 10 percent', () => {
   const feedback = buildGeneratedExamProgrammaticFeedback({
     questions: [
       question({
         id: 'generated-q1',
         number: '1',
-        prompt: 'Which statement best describes the role of the critic in actor-critic methods?',
+        prompt: 'Which statement best distinguishes SARSA from Q-learning?',
         options: [
-          { id: 'A', text: 'It performs exhaustive tree search at every decision.' },
-          { id: 'B', text: 'It replaces the policy with a model of transition probabilities.' },
-          { id: 'C', text: 'It stores expert demonstrations for behavior cloning.' },
-          { id: 'D', text: 'It learns value estimates that assess actions or states, often with single-step TD, while the actor updates the policy.' },
+          { id: 'A', text: 'SARSA uses the action actually selected by the current behavior policy.' },
+          { id: 'B', text: 'SARSA uses the maximum next action value.' },
+          { id: 'C', text: 'SARSA ignores the next state.' },
+          { id: 'D', text: 'SARSA requires a model.' },
         ],
-        answer: { correctOptionIds: ['D'], expectedText: null, source: 'inferred' },
+        answer: { correctOptionIds: ['A'], expectedText: null, source: 'inferred' },
+      }),
+    ],
+  })
+
+  assert.equal(feedback.issues.some((issue) => issue.code === 'weak-choice-options'), true)
+  assert.match(feedback.text, /within 10% visible length/)
+})
+
+test('programmatic draft audit accepts balanced near-miss choice options', () => {
+  const feedback = buildGeneratedExamProgrammaticFeedback({
+    questions: [
+      question({
+        id: 'generated-q1',
+        number: '1',
+        prompt: 'Which statement best distinguishes SARSA from Q-learning?',
+        options: [
+          { id: 'A', text: 'It backs up the action actually sampled by the current policy.' },
+          { id: 'B', text: 'It backs up the greedy action under the current value table.' },
+          { id: 'C', text: 'It backs up the full expectation under the target policy.' },
+          { id: 'D', text: 'It backs up the completed return after the whole episode.' },
+        ],
+        answer: { correctOptionIds: ['A'], expectedText: null, source: 'inferred' },
+        courseSection: 'Model-Free Learning From Experience',
+        sourceSearchTerms: ['SARSA|Q-learning|Expected SARSA|off-policy'],
+        sourceEvidence: [
+          {
+            source: 'lecture.pdf',
+            evidence: 'SARSA backs up the sampled next action, Q-learning backs up a greedy next action, and Expected SARSA backs up an expectation under a policy.',
+          },
+        ],
       }),
     ],
   })
 
   assert.equal(feedback.issues.some((issue) => issue.code === 'weak-choice-options'), false)
-  assert.doesNotMatch(feedback.text, /Weak choice-option/)
+  assert.match(feedback.text, /Weak choice-option tells: 0/)
 })
 
 test('programmatic draft audit requires internal-search evidence when enabled', () => {
