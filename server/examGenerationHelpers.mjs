@@ -3,6 +3,109 @@ const maxCoverageAngles = 220
 const predictableMultiSelectDominanceRatio = 0.75
 const predictableMultiSelectMinCount = 3
 const feedbackQuestionReferenceLimit = 14
+const defaultExamQuestionCount = 35
+const examBlueprintBackupRatio = 0.22
+const examBlueprintMaxTargetLength = 260
+const examBlueprintSearchHintLimit = 4
+
+export const defaultExamGenerationSettings = Object.freeze({
+  seed: '',
+  searchLimit: 8,
+  searchContext: 12,
+  coverageRandomness: 70,
+  coverageMode: 'hybrid-weighted',
+})
+
+export function normalizeExamGenerationSettings(value = {}, fallbackSeed = '') {
+  const raw = value && typeof value === 'object' ? value : {}
+  return {
+    seed: normalizeExamSeed(raw.seed, fallbackSeed),
+    searchLimit: clampInteger(raw.searchLimit, 3, 30, defaultExamGenerationSettings.searchLimit),
+    searchContext: clampInteger(raw.searchContext, 4, 40, defaultExamGenerationSettings.searchContext),
+    coverageRandomness: clampInteger(raw.coverageRandomness, 0, 100, defaultExamGenerationSettings.coverageRandomness),
+    coverageMode: raw.coverageMode === 'hybrid-weighted'
+      ? 'hybrid-weighted'
+      : defaultExamGenerationSettings.coverageMode,
+  }
+}
+
+export function buildExamBlueprint({
+  examId = '',
+  promptContext = {},
+  settings = defaultExamGenerationSettings,
+  questionCount = null,
+} = {}) {
+  const normalizedSettings = normalizeExamGenerationSettings(settings, examId || 'exam-blueprint')
+  const rng = seededRandom(`${normalizedSettings.seed}:blueprint`)
+  const sections = normalizedBlueprintSections(promptContext)
+  const count = normalizeBlueprintQuestionCount(questionCount, promptContext)
+  const historySectionCounts = generatedHistorySectionCounts(promptContext?.generatedDuplicateHistory)
+  const sectionScores = sections.map((section, index) => ({
+    ...section,
+    index,
+    weight: sectionBlueprintWeight(section, promptContext, historySectionCounts, rng, normalizedSettings.coverageRandomness),
+    historyCount: historySectionCounts.get(normalizeSectionTitle(section.title)) ?? 0,
+    examWorthiness: examWorthinessLabel(sectionExamWorthinessScore(section.text)),
+  }))
+  const allocationEntries = allocateBlueprintSections(sectionScores, count, rng)
+  const typeSequence = blueprintQuestionTypeSequence(promptContext, count)
+  const allocatedSlots = allocationEntries.map((entry, index) => {
+    const targetIndex = entry.countIndex % entry.section.targets.length
+    const target = entry.section.targets[targetIndex] || entry.section.title
+    return {
+      id: `primary-${String(index + 1).padStart(3, '0')}`,
+      kind: 'primary',
+      slot: index + 1,
+      type: typeSequence[index] || 'single',
+      courseSection: entry.section.title,
+      target,
+      examWorthiness: entry.section.examWorthiness,
+      searchHints: blueprintSearchHints(entry.section.title, target),
+      rationale: entry.reason,
+    }
+  })
+  const primarySlots = seededShuffle(allocatedSlots, rng).map((slot, index) => ({
+    ...slot,
+    id: `primary-${String(index + 1).padStart(3, '0')}`,
+    slot: index + 1,
+    type: typeSequence[index] || slot.type || 'single',
+  }))
+  const backupSlots = buildBackupBlueprintSlots(sectionScores, primarySlots, typeSequence, rng)
+  const sectionAllocation = sortedCounts(primarySlots.map((slot) => slot.courseSection))
+
+  return {
+    version: 1,
+    examId,
+    settings: normalizedSettings,
+    questionCount: count,
+    typeCounts: sortedCounts(primarySlots.map((slot) => slot.type)),
+    sectionAllocation,
+    primarySlots,
+    backupSlots,
+  }
+}
+
+export function sourceSearchSettingsViolation(command, settings = defaultExamGenerationSettings) {
+  const detail = String(command || '')
+  if (!/scripts\/searchTopicSource\.mjs/.test(detail)) return ''
+  const normalizedSettings = normalizeExamGenerationSettings(settings, 'exam-blueprint')
+  const problems = []
+  const actualContext = commandFlagValue(detail, 'context')
+  const actualLimit = commandFlagValue(detail, 'limit')
+  const actualSeed = commandFlagValue(detail, 'seed')
+
+  if (String(actualContext ?? '') !== String(normalizedSettings.searchContext)) {
+    problems.push(`expected --context ${normalizedSettings.searchContext}`)
+  }
+  if (String(actualLimit ?? '') !== String(normalizedSettings.searchLimit)) {
+    problems.push(`expected --limit ${normalizedSettings.searchLimit}`)
+  }
+  if (String(actualSeed ?? '') !== normalizedSettings.seed) {
+    problems.push(`expected --seed ${normalizedSettings.seed}`)
+  }
+  if (problems.length === 0) return ''
+  return `${detail.slice(0, 500)} (${problems.join('; ')})`
+}
 
 export function createExamGenerationPromptContext(baseBank) {
   const sets = Array.isArray(baseBank?.sets) ? baseBank.sets : []
@@ -33,10 +136,16 @@ export function buildExamDraftGenerationPrompt({
   promptContext,
   codeExampleFiles = [],
   steeringPrompt = '',
+  examBlueprint = null,
+  generationSettings = defaultExamGenerationSettings,
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
   const imageUrlPrefix = imageUrlPrefixFor(topicId, examId)
   const steeringBlock = examSteeringPromptBlock(steeringPrompt)
+  const blueprintBlock = examBlueprintPromptBlock(examBlueprint)
+  const planningInstruction = examBlueprint
+    ? '- Use the deterministic coverage blueprint below. Do not create your own topic mix, random section plan, or replacement slots.'
+    : '- Before writing questions, create a lightweight internal coverage plan: slot, course section, depth, type, and search terms. Use it to guide the final JSON, but do not include the plan as a separate output artifact.'
 
   return `
 Generate one new TurboLearner exam question set.
@@ -44,15 +153,19 @@ Generate one new TurboLearner exam question set.
 Exam id to use exactly: ${examId}
 Asset directory for any generated PNG/JPEG images: ${examAssetDir}
 Image URL prefix for generated images: ${imageUrlPrefix}
+Generation settings:
+${JSON.stringify(normalizeExamGenerationSettings(generationSettings, examId), null, 2)}
 
 Output contract:
 - Write exactly one TurboLearner question set JSON object, not a full bank.
 - Save the JSON file here: ${outputPath || 'return the JSON in your final response'}.
 - If an output path is provided, create or overwrite that file yourself and keep your final chat response brief.
-- Before writing questions, create a lightweight internal coverage plan: slot, course section, depth, type, and search terms. Use it to guide the final JSON, but do not include the plan as a separate output artifact.
+- ${planningInstruction.slice(2)}
 - If internal source search is available, use it for every question and include sourceEvidence metadata in the JSON.
 
 ${steeringBlock}
+
+${blueprintBlock}
 
 ${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
@@ -87,11 +200,14 @@ export function buildExamReviewPrompt({
   draftSet,
   programmaticFeedback = null,
   steeringPrompt = '',
+  examBlueprint = null,
+  generationSettings = defaultExamGenerationSettings,
 }) {
   const extractionNotes = extractionNotesText(failedFiles)
   const imageUrlPrefix = imageUrlPrefixFor(topicId, examId)
   const draftAudit = String(programmaticFeedback || '').trim() || 'No programmatic draft audit was provided.'
   const steeringBlock = examSteeringPromptBlock(steeringPrompt)
+  const blueprintBlock = examBlueprintPromptBlock(examBlueprint)
 
   return `
 Review and repair this draft TurboLearner exam. Return the corrected final exam JSON.
@@ -99,6 +215,8 @@ Review and repair this draft TurboLearner exam. Return the corrected final exam 
 Exam id to use exactly: ${examId}
 Asset directory for any generated PNG/JPEG images: ${examAssetDir}
 Image URL prefix for generated images: ${imageUrlPrefix}
+Generation settings:
+${JSON.stringify(normalizeExamGenerationSettings(generationSettings, examId), null, 2)}
 
 You are the second-pass exam editor. The first pass generated a draft. Your job is to fix it, not to comment on it.
 
@@ -111,9 +229,11 @@ Output contract:
 - If you introduce a new image question, generate/copy a PNG/JPEG into the asset directory and reference it as <image>${imageUrlPrefix}filename.png</image>.
 - Final JSON must pass every shared guideline below.
 - Resolve every blocking issue in the Programmatic draft audit before writing final JSON. These checks run again after review.
-- Preserve or repair courseSection, sourceSearchTerms, and sourceEvidence metadata for every question.
+- Preserve or repair blueprintSlotId, blueprintTarget, blueprintStatus, blueprintReplacementReason, courseSection, sourceSearchTerms, and sourceEvidence metadata for every question.
 
 ${steeringBlock}
+
+${blueprintBlock}
 
 ${sharedExamQuestionSetGuidelines({ examId, imageUrlPrefix })}
 
@@ -164,6 +284,25 @@ User exam steering prompt:
 Treat the following learner instructions as high-priority direction for this generated exam's focus, style, difficulty, phrasing, and option construction, unless they conflict with the output contract, schema validity, source grounding, image asset requirements, or duplicate-avoidance rules.
 
 ${text}
+`.trim()
+}
+
+function examBlueprintPromptBlock(examBlueprint) {
+  if (!examBlueprint) return ''
+  return `
+Deterministic coverage blueprint:
+${JSON.stringify(examBlueprint, null, 2)}
+
+Blueprint rules:
+- Generate exactly one question for each primarySlots entry unless internal source search shows that slot is weak or not testable.
+- If a primary slot is weak, replace it with one unused backupSlots entry and include a concise blueprintReplacementReason.
+- Do not invent additional sections, slot ids, or random coverage targets.
+- Every generated question must include blueprintSlotId, blueprintTarget, blueprintStatus, and courseSection.
+- blueprintSlotId must be the exact id of the primary or backup slot used.
+- blueprintTarget should restate the slot target in one short phrase.
+- blueprintStatus must be "primary" for primary slots and "backup" for backup slots.
+- courseSection must exactly match the slot courseSection.
+- Use each blueprint slot at most once.
 `.trim()
 }
 
@@ -233,7 +372,8 @@ Shared quality requirements:
 - Match the real exams' style, phrasing, grouping, point values, and difficulty.
 - Infer exam length and type mix from real style examples only.
 - Cover the selected source material broadly without adding topics not evidenced by sources.
-- Include courseSection, sourceSearchTerms, and sourceEvidence on every generated question when internal source search is available.
+- Include blueprintSlotId, blueprintTarget, blueprintStatus, courseSection, sourceSearchTerms, and sourceEvidence on every generated question when a deterministic blueprint/internal source search is available.
+- Use exactly one blueprint slot per question. Use primary slots by default; use a backup slot only when the primary slot is weak after source search, and then include blueprintReplacementReason.
 - Repeating important concepts is allowed only when the angle is fresh and useful for spaced practice.
 - Do not clone the same surface scenario, code bug, diagram concept, numeric setup, or option pattern from any existing question.
 - Code questions should vary the implementation mistakes they test; do not repeatedly use the same precision/recall/F1 bug unless the source material makes that repetition necessary.
@@ -271,6 +411,7 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext
   const sourceEvidenceAudit = generatedSourceEvidenceAudit(questions, auditContext)
   const sectionAudit = generatedCourseSectionAudit(questions, auditContext)
   const duplicateAudit = generatedDuplicateAudit(questions, auditContext)
+  const blueprintAudit = generatedBlueprintAudit(questions, auditContext)
 
   if (questions.length === 0) {
     issues.push({
@@ -344,6 +485,62 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext
     })
   }
 
+  if (blueprintAudit.missingSlotMetadata.length > 0) {
+    issues.push({
+      code: 'blueprint-slot-missing-metadata',
+      message: `${blueprintAudit.missingSlotMetadata.length} question${blueprintAudit.missingSlotMetadata.length === 1 ? '' : 's'} lack blueprint slot metadata.`,
+      detail: `Every question must include blueprintSlotId, blueprintTarget, and blueprintStatus. Affected questions: ${formatQuestionReferences(blueprintAudit.missingSlotMetadata)}.`,
+    })
+  }
+
+  if (blueprintAudit.unknownSlotQuestions.length > 0) {
+    issues.push({
+      code: 'blueprint-slot-invalid',
+      message: `${blueprintAudit.unknownSlotQuestions.length} question${blueprintAudit.unknownSlotQuestions.length === 1 ? '' : 's'} reference a blueprint slot that does not exist.`,
+      detail: `Use only primarySlots or backupSlots from the deterministic blueprint. Affected questions: ${formatQuestionReferences(blueprintAudit.unknownSlotQuestions)}.`,
+    })
+  }
+
+  if (blueprintAudit.duplicateSlotQuestions.length > 0) {
+    issues.push({
+      code: 'blueprint-slot-duplicate-use',
+      message: `${blueprintAudit.duplicateSlotQuestions.length} question${blueprintAudit.duplicateSlotQuestions.length === 1 ? '' : 's'} reuse a blueprint slot already used earlier.`,
+      detail: `Use each blueprint slot at most once. Affected questions: ${formatQuestionReferences(blueprintAudit.duplicateSlotQuestions)}.`,
+    })
+  }
+
+  if (blueprintAudit.sectionMismatchQuestions.length > 0) {
+    issues.push({
+      code: 'blueprint-course-section-mismatch',
+      message: `${blueprintAudit.sectionMismatchQuestions.length} question${blueprintAudit.sectionMismatchQuestions.length === 1 ? '' : 's'} use a courseSection that does not match their blueprint slot.`,
+      detail: `Set courseSection exactly to the slot courseSection. Affected questions: ${formatQuestionReferences(blueprintAudit.sectionMismatchQuestions)}.`,
+    })
+  }
+
+  if (blueprintAudit.primaryCoverageGap.length > 0) {
+    issues.push({
+      code: 'blueprint-primary-coverage-gap',
+      message: `${blueprintAudit.primaryCoverageGap.length} primary blueprint slot${blueprintAudit.primaryCoverageGap.length === 1 ? '' : 's'} were omitted without backup replacements.`,
+      detail: `Missing primary slots include: ${blueprintAudit.primaryCoverageGap.slice(0, 12).map((slot) => `${slot.id} (${slot.courseSection})`).join(', ')}.`,
+    })
+  }
+
+  if (blueprintAudit.backupWithoutReason.length > 0) {
+    issues.push({
+      code: 'blueprint-backup-without-reason',
+      message: `${blueprintAudit.backupWithoutReason.length} backup-slot question${blueprintAudit.backupWithoutReason.length === 1 ? '' : 's'} lack a replacement reason.`,
+      detail: `Backup slots require blueprintReplacementReason explaining why a primary slot was rejected. Affected questions: ${formatQuestionReferences(blueprintAudit.backupWithoutReason)}.`,
+    })
+  }
+
+  if (blueprintAudit.extraBackupQuestions.length > 0) {
+    issues.push({
+      code: 'blueprint-extra-backup-use',
+      message: `${blueprintAudit.extraBackupQuestions.length} backup-slot question${blueprintAudit.extraBackupQuestions.length === 1 ? '' : 's'} were added without replacing omitted primary slots.`,
+      detail: `Backup slots are replacements only; remove the extra backup question or omit a weak primary slot with a replacement reason. Affected questions: ${formatQuestionReferences(blueprintAudit.extraBackupQuestions)}.`,
+    })
+  }
+
   const lines = [
     issues.length > 0
       ? `Blocking issues detected (${issues.length}):`
@@ -352,6 +549,7 @@ export function buildGeneratedExamProgrammaticFeedback(questionSet, auditContext
     `Question type counts: ${formatCountMap(typeCounts)}.`,
     `Content signals: ${contentSignals.codeQuestionCount} code question(s), ${contentSignals.imageQuestionCount} image/graph question(s), ${contentSignals.groupedQuestionCount} grouped child question(s).`,
     `Course section counts: ${formatCountMap(sectionAudit.sectionCounts)}.`,
+    `Blueprint slot counts: ${formatCountMap(blueprintAudit.slotCounts)}.`,
     `Missing source evidence: ${sourceEvidenceAudit.missingEvidence.length}.`,
     stats.total > 0
       ? `Multi-select answer-count distribution: ${formatCountMap(stats.counts)}.`
@@ -456,6 +654,413 @@ function generatedDuplicateAudit(questions, auditContext) {
     }
   }
   return { matches }
+}
+
+function generatedBlueprintAudit(questions, auditContext) {
+  const examBlueprint = auditContext?.examBlueprint
+  const primarySlots = Array.isArray(examBlueprint?.primarySlots) ? examBlueprint.primarySlots : []
+  const backupSlots = Array.isArray(examBlueprint?.backupSlots) ? examBlueprint.backupSlots : []
+  if (primarySlots.length === 0 && backupSlots.length === 0) {
+    return {
+      slotCounts: {},
+      missingSlotMetadata: [],
+      unknownSlotQuestions: [],
+      duplicateSlotQuestions: [],
+      sectionMismatchQuestions: [],
+      primaryCoverageGap: [],
+      backupWithoutReason: [],
+      extraBackupQuestions: [],
+    }
+  }
+
+  const slotsById = new Map([...primarySlots, ...backupSlots].map((slot) => [slot.id, slot]))
+  const usedSlotIds = new Set()
+  const duplicateSlotQuestions = []
+  const unknownSlotQuestions = []
+  const sectionMismatchQuestions = []
+  const missingSlotMetadata = []
+  const backupWithoutReason = []
+  const questionBySlotId = new Map()
+
+  for (const question of Array.isArray(questions) ? questions : []) {
+    const blueprintSlotId = String(question?.blueprintSlotId || '').trim()
+    const blueprintTarget = String(question?.blueprintTarget || '').trim()
+    const blueprintStatus = String(question?.blueprintStatus || '').trim()
+    if (!blueprintSlotId || !blueprintTarget || !blueprintStatus) {
+      missingSlotMetadata.push({ ...question, reference: questionReference(question) })
+      continue
+    }
+    const slot = slotsById.get(blueprintSlotId)
+    if (!slot) {
+      unknownSlotQuestions.push({ ...question, reference: questionReference(question) })
+      continue
+    }
+    if (usedSlotIds.has(blueprintSlotId)) {
+      duplicateSlotQuestions.push({ ...question, reference: questionReference(question) })
+    }
+    usedSlotIds.add(blueprintSlotId)
+    questionBySlotId.set(blueprintSlotId, { ...question, reference: questionReference(question) })
+    if (normalizeSectionTitle(question?.courseSection) !== normalizeSectionTitle(slot.courseSection)) {
+      sectionMismatchQuestions.push({ ...question, reference: questionReference(question) })
+    }
+    if (
+      slot.kind === 'backup' &&
+      (!String(question?.blueprintReplacementReason || '').trim() || blueprintStatus !== 'backup')
+    ) {
+      backupWithoutReason.push({ ...question, reference: questionReference(question) })
+    }
+  }
+
+  const usedBackupSlots = backupSlots.filter((slot) => usedSlotIds.has(slot.id))
+  const usedBackupCount = usedBackupSlots.length
+  const missingPrimarySlots = primarySlots.filter((slot) => !usedSlotIds.has(slot.id))
+  const primaryCoverageGap = missingPrimarySlots.slice(usedBackupCount)
+  const extraBackupQuestions = usedBackupSlots
+    .slice(missingPrimarySlots.length)
+    .map((slot) => questionBySlotId.get(slot.id))
+    .filter(Boolean)
+
+  return {
+    slotCounts: sortedCounts(
+      (Array.isArray(questions) ? questions : []).map((question) => String(question?.blueprintStatus || 'missing').trim() || 'missing'),
+    ),
+    missingSlotMetadata,
+    unknownSlotQuestions,
+    duplicateSlotQuestions,
+    sectionMismatchQuestions,
+    primaryCoverageGap,
+    backupWithoutReason,
+    extraBackupQuestions,
+  }
+}
+
+function normalizedBlueprintSections(promptContext) {
+  const courseSections = Array.isArray(promptContext?.courseSections) ? promptContext.courseSections : []
+  const sections = courseSections
+    .map((section) => {
+      const title = String(section?.title || '').trim()
+      const text = String(section?.text || '').trim()
+      return {
+        title,
+        text,
+        targets: blueprintTargetsForSection(title, text),
+      }
+    })
+    .filter((section) => section.title && section.targets.length > 0)
+  if (sections.length > 0) return sections
+
+  const concepts = Object.keys(promptContext?.realExamCoverageProfile?.conceptCounts || {}).slice(0, 12)
+  if (concepts.length > 0) {
+    return concepts.map((concept) => ({
+      title: concept,
+      text: concept,
+      targets: [concept],
+    }))
+  }
+
+  return [{
+    title: 'General Course Scope',
+    text: String(promptContext?.courseContext || '').trim() || 'General course material',
+    targets: ['General course material'],
+  }]
+}
+
+function normalizeBlueprintQuestionCount(questionCount, promptContext) {
+  const explicit = Number(questionCount)
+  if (Number.isFinite(explicit) && explicit >= 1) return Math.round(explicit)
+  const counts = Array.isArray(promptContext?.styleExamples?.styleMetrics?.questionCounts)
+    ? promptContext.styleExamples.styleMetrics.questionCounts.map(Number).filter((count) => Number.isFinite(count) && count > 0)
+    : []
+  if (counts.length === 0) return defaultExamQuestionCount
+  const sorted = [...counts].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)] || defaultExamQuestionCount
+}
+
+function blueprintQuestionTypeSequence(promptContext, questionCount) {
+  const typeCounts = promptContext?.styleExamples?.styleMetrics?.typeCounts || {}
+  const knownEntries = Object.entries(typeCounts)
+    .map(([type, count]) => [type, Number(count)])
+    .filter(([type, count]) => ['single', 'multiple', 'open'].includes(type) && Number.isFinite(count) && count > 0)
+  if (knownEntries.length === 0) return Array.from({ length: questionCount }, () => 'single')
+  const total = knownEntries.reduce((sum, [, count]) => sum + count, 0)
+  const allocations = knownEntries.map(([type, count]) => {
+    const exact = (count / total) * questionCount
+    return {
+      type,
+      count: Math.floor(exact),
+      remainder: exact - Math.floor(exact),
+    }
+  })
+  let remaining = questionCount - allocations.reduce((sum, entry) => sum + entry.count, 0)
+  for (const entry of [...allocations].sort((a, b) => b.remainder - a.remainder)) {
+    if (remaining <= 0) break
+    entry.count += 1
+    remaining -= 1
+  }
+  const sequence = []
+  for (const type of ['single', 'multiple', 'open']) {
+    const entry = allocations.find((candidate) => candidate.type === type)
+    for (let index = 0; index < (entry?.count ?? 0); index += 1) sequence.push(type)
+  }
+  while (sequence.length < questionCount) sequence.push('single')
+  return sequence.slice(0, questionCount)
+}
+
+function blueprintTargetsForSection(title, text) {
+  const rawParts = String(text || title || '')
+    .split('\n')
+    .flatMap((line) => cleanBlueprintLine(line).split(/\s*;\s+|\s+\|\s+/))
+    .map((part) => part.replace(/\s+/g, ' ').trim())
+    .filter((part) => part.length >= 24 && !/^covered topics$/i.test(part))
+  const worthinessSorted = [...new Set(rawParts)]
+    .map((target, index) => ({
+      target: target.slice(0, examBlueprintMaxTargetLength),
+      index,
+      score: sectionExamWorthinessScore(target),
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.target)
+  return worthinessSorted.length > 0 ? worthinessSorted.slice(0, 10) : [String(title || 'Course section').trim()]
+}
+
+function cleanBlueprintLine(line) {
+  return String(line || '')
+    .replace(/^[-*]\s*/, '')
+    .replace(/^(Covered|Expected depth|Course-specific notation\/terms|Lecture-specific nuance\/caveats|General grading\/scope rules):\s*/i, '')
+    .trim()
+}
+
+function sectionBlueprintWeight(section, promptContext, historySectionCounts, rng, coverageRandomness) {
+  const normalizedTitle = normalizeSectionTitle(section.title)
+  const historyCount = historySectionCounts.get(normalizedTitle) ?? 0
+  const worthiness = sectionExamWorthinessScore(`${section.title}\n${section.text}`)
+  const realSignal = realExamSectionSignal(section, promptContext)
+  const debtMultiplier = 1 + Math.min(2.5, historySectionCounts.size === 0 ? 0 : 1 / (1 + historyCount))
+  const deterministic = Math.max(0.35, 1 + worthiness * 0.55 + realSignal * 0.35) * debtMultiplier
+  const randomness = Math.max(0, Math.min(1, Number(coverageRandomness) / 100))
+  const jitter = 0.45 + rng() * 1.65
+  return Math.max(0.05, deterministic * (1 - randomness) + deterministic * jitter * randomness)
+}
+
+function sectionExamWorthinessScore(text) {
+  const value = String(text || '').toLowerCase()
+  let score = 0
+  const positivePatterns = [
+    /\bcompute|\bcalculation|\bnumeric|\bformula|\bupdate|\bbackup|\btrace|\bderive/,
+    /\balgorithm|\bpseudocode|\bimplementation|\bcode|\btable|\bmatrix|\bcounts?\b/,
+    /\bcompare|\bdistinguish|\btrade[- ]?off|\bclassification|\binterpret/,
+    /\bpolicy|\bvalue|\breward|\btransition|\bprobabilit|\bexpectation/,
+  ]
+  for (const pattern of positivePatterns) {
+    if (pattern.test(value)) score += 1
+  }
+  if (/\brecognition-only|\bskipped|\badmin|\bassignment groups?\b/.test(value)) score -= 1
+  return Math.max(0, score)
+}
+
+function examWorthinessLabel(score) {
+  if (score >= 4) return 'high'
+  if (score >= 2) return 'medium'
+  return 'low'
+}
+
+function realExamSectionSignal(section, promptContext) {
+  const tokens = importantTokens(`${section.title} ${section.targets.join(' ')}`).slice(0, 8)
+  if (tokens.length === 0) return 0
+  const haystack = [
+    ...Object.keys(promptContext?.realExamCoverageProfile?.conceptCounts || {}),
+    ...(Array.isArray(promptContext?.realExamCoverageProfile?.angleSignatures)
+      ? promptContext.realExamCoverageProfile.angleSignatures.flatMap((angle) => [
+        ...(Array.isArray(angle?.concepts) ? angle.concepts : []),
+        angle?.signature,
+      ])
+      : []),
+  ].join(' ').toLowerCase()
+  let matches = 0
+  for (const token of tokens) {
+    if (haystack.includes(token)) matches += 1
+  }
+  return Math.min(3, matches)
+}
+
+function generatedHistorySectionCounts(history) {
+  const counts = new Map()
+  for (const entry of Array.isArray(history) ? history : []) {
+    const normalized = normalizeSectionTitle(entry?.courseSection)
+    if (!normalized) continue
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1)
+  }
+  return counts
+}
+
+function allocateBlueprintSections(sections, questionCount, rng) {
+  const allocations = new Map(sections.map((section) => [section.title, 0]))
+  const entries = []
+  const maxPerSection = Math.max(2, Math.ceil(questionCount * 0.16))
+  const floorSections = questionCount >= sections.length
+    ? seededShuffle(sections, rng)
+    : weightedSampleWithoutReplacement(sections, questionCount, rng)
+
+  for (const section of floorSections.slice(0, questionCount)) {
+    allocations.set(section.title, (allocations.get(section.title) ?? 0) + 1)
+    entries.push({
+      section,
+      countIndex: (allocations.get(section.title) ?? 1) - 1,
+      reason: 'section-floor',
+    })
+  }
+
+  while (entries.length < questionCount) {
+    const eligible = sections.filter((section) => (allocations.get(section.title) ?? 0) < maxPerSection)
+    const section = weightedPick(eligible.length > 0 ? eligible : sections, rng)
+    allocations.set(section.title, (allocations.get(section.title) ?? 0) + 1)
+    entries.push({
+      section,
+      countIndex: (allocations.get(section.title) ?? 1) - 1,
+      reason: section.historyCount === 0 ? 'weighted-undercovered' : 'weighted',
+    })
+  }
+
+  return entries
+}
+
+function buildBackupBlueprintSlots(sections, primarySlots, typeSequence, rng) {
+  const backupCount = Math.max(3, Math.ceil(primarySlots.length * examBlueprintBackupRatio))
+  const primaryCounts = new Map(Object.entries(sortedCounts(primarySlots.map((slot) => slot.courseSection))))
+  const ranked = seededShuffle(sections, rng)
+    .sort((a, b) => {
+      const aCount = Number(primaryCounts.get(a.title) ?? 0)
+      const bCount = Number(primaryCounts.get(b.title) ?? 0)
+      return aCount - bCount || b.weight - a.weight
+    })
+  const slots = []
+  for (let index = 0; index < backupCount; index += 1) {
+    const section = ranked[index % ranked.length]
+    const target = section.targets[(index + 1) % section.targets.length] || section.targets[0] || section.title
+    slots.push({
+      id: `backup-${String(index + 1).padStart(3, '0')}`,
+      kind: 'backup',
+      slot: index + 1,
+      type: typeSequence[(primarySlots.length - 1 - index + typeSequence.length) % typeSequence.length] || 'single',
+      courseSection: section.title,
+      target,
+      examWorthiness: section.examWorthiness,
+      searchHints: blueprintSearchHints(section.title, target),
+      rationale: 'fallback-for-weak-primary-slot',
+    })
+  }
+  return slots
+}
+
+function blueprintSearchHints(title, target) {
+  const tokens = importantTokens(`${title} ${target}`)
+  const phrases = extractSearchPhrases(target)
+  return uniqueStrings([...phrases, ...tokens])
+    .slice(0, examBlueprintSearchHintLimit)
+}
+
+function extractSearchPhrases(text) {
+  return [...String(text || '').matchAll(/\b[A-Z][A-Za-z0-9]*(?:[-\s]+[A-Z]?[A-Za-z0-9]+){0,3}\b/g)]
+    .map((match) => match[0].trim())
+    .filter((phrase) => phrase.length >= 4)
+    .slice(0, 4)
+}
+
+function importantTokens(text) {
+  const stopwords = new Set([
+    'about', 'after', 'also', 'and', 'are', 'because', 'between', 'course', 'covered', 'depth',
+    'expected', 'from', 'have', 'into', 'may', 'not', 'section', 'should', 'that', 'the',
+    'their', 'them', 'this', 'through', 'under', 'uses', 'using', 'when', 'where', 'which',
+    'with', 'without',
+  ])
+  return uniqueStrings(String(text || '')
+    .toLowerCase()
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[^a-z0-9+_*'-]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.replace(/^[-']+|[-']+$/g, ''))
+    .filter((token) => token.length >= 4 && !stopwords.has(token)))
+}
+
+function weightedSampleWithoutReplacement(items, count, rng) {
+  const pool = [...items]
+  const picked = []
+  while (picked.length < count && pool.length > 0) {
+    const item = weightedPick(pool, rng)
+    picked.push(item)
+    pool.splice(pool.indexOf(item), 1)
+  }
+  return picked
+}
+
+function weightedPick(items, rng) {
+  if (!Array.isArray(items) || items.length === 0) return null
+  const total = items.reduce((sum, item) => sum + Math.max(0.01, Number(item.weight) || 0.01), 0)
+  let cursor = rng() * total
+  for (const item of items) {
+    cursor -= Math.max(0.01, Number(item.weight) || 0.01)
+    if (cursor <= 0) return item
+  }
+  return items[items.length - 1]
+}
+
+function seededShuffle(values, rng) {
+  const shuffled = [...values]
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(rng() * (index + 1))
+    const current = shuffled[index]
+    shuffled[index] = shuffled[swapIndex]
+    shuffled[swapIndex] = current
+  }
+  return shuffled
+}
+
+function seededRandom(seed) {
+  let state = hashString(seed || 'seed') || 1
+  return () => {
+    state += 0x6D2B79F5
+    let t = state
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function hashString(value) {
+  let hash = 2166136261
+  const text = String(value || '')
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+function normalizeExamSeed(value, fallbackSeed) {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  if (normalized) return normalized
+  const fallback = String(fallbackSeed || 'exam-blueprint')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  return fallback || 'exam-blueprint'
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.max(min, Math.min(max, Math.round(number)))
+}
+
+function commandFlagValue(command, flagName) {
+  const pattern = new RegExp(`--${flagName}\\s+(?:"([^"]*)"|'([^']*)'|([^\\s]+))`)
+  const match = pattern.exec(String(command || ''))
+  return match ? (match[1] ?? match[2] ?? match[3] ?? '') : null
 }
 
 function generatedMultiSelectAnswerStats(questions) {
@@ -622,6 +1227,7 @@ function duplicateHistory(sets) {
     setId: set.id,
     questionId: question?.id,
     type: question?.type,
+    courseSection: typeof question?.courseSection === 'string' ? question.courseSection : '',
     concepts: Array.isArray(question?.concepts) ? question.concepts : [],
     signature: textSignature([
       question?.groupTitle,
@@ -841,6 +1447,12 @@ function sortedCounts(values) {
   )
 }
 
+function uniqueStrings(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean))]
+}
+
 function uniqueNumbers(values) {
   return [...new Set(values.map(Number).filter(Number.isFinite))].sort((a, b) => a - b)
 }
@@ -874,6 +1486,7 @@ Internal source access rules:
 - The internal search command is the ONLY allowed way to inspect course source material.
 - The search pattern is ALWAYS a JavaScript regular expression, not literal text search.
 - Use the command template from internalSearch.commandTemplate and replace <regex> with a precise regex pattern.
+- Preserve every required flag in the command template exactly, including --context, --limit, and --seed.
 - Express boundaries yourself. For example, use "Dyna\\s" or "Dyna " for Dyna followed by whitespace, "Q\\(s,\\s*a\\)" for Q(s,a), and "Monte\\s+Carlo|TD\\(0\\)" for alternatives.
 - Spaces inside quotes are preserved, including trailing spaces in patterns such as "Dyna ".
 - --limit is the maximum number of matching source snippets to display; if at least that many matches exist, that many SOURCE entries will be shown.

@@ -57,11 +57,12 @@ They are reduced to compact programmatic duplicate-history signatures. These sig
 1. Topic sources are extracted and normalized into `source-corpus.txt`.
 2. Course context is generated or loaded as the inclusive coverage blueprint.
 3. A generation job starts with an exam id, job id, asset directory, and append-only log file.
-4. The draft Codex thread receives the blueprint, real-exam style guidance, generation constraints, source-search contract, and duplicate-history signatures.
-5. Codex writes `draft-question-set.json`.
-6. A programmatic draft audit checks structure, coverage, grounding, duplicate risk, answer distribution, and image references.
-7. The review Codex thread receives the draft plus audit findings and writes `final-question-set.json`.
-8. A final audit validates the reviewed exam before it is persisted to SQLite.
+4. The server builds a deterministic `exam-blueprint.json` from course context, real-exam type mix, generated-history debt, and the user-selected seed/settings.
+5. The draft Codex thread receives assigned blueprint slots, real-exam style guidance, generation constraints, source-search contract, and duplicate-history signatures.
+6. Codex writes `draft-question-set.json`.
+7. A programmatic draft audit checks structure, blueprint adherence, coverage, grounding, duplicate risk, answer distribution, and image references.
+8. The review Codex thread receives the draft plus audit findings and writes `final-question-set.json`.
+9. A final audit validates the reviewed exam before it is persisted to SQLite.
 
 If the final audit fails, the exam should not be treated as successfully generated.
 
@@ -70,16 +71,20 @@ If the final audit fails, the exam should not be treated as successfully generat
 Codex is expected to inspect course sources only through:
 
 ```bash
-node scripts/searchTopicSource.mjs <topicId> "<regex>" --context 20 --limit 30
+node scripts/searchTopicSource.mjs <topicId> "<regex>" --context <n> --limit <n> --seed <seed>
 ```
 
 Search is regex-based, not fuzzy semantic search. This lets Codex search precisely for course terms such as:
 
 ```bash
-node scripts/searchTopicSource.mjs introduction-to-rl "Dyna " --context 20 --limit 30
+node scripts/searchTopicSource.mjs introduction-to-rl "Dyna " --context 12 --limit 8 --seed abc123
 ```
 
-The search output is a compact text dump of matched source context. `--context 20` means include up to 20 surrounding source lines before and after each regex match. `--limit 30` means return at most 30 hits.
+The search output is a compact text dump of matched source context. `--context 12` means include up to 12 surrounding source lines before and after each regex match. `--limit 8` means return at most 8 hits. The exact values come from the generation settings selected before the run starts.
+
+When the source corpus has more matches than the limit, the search tool samples hits with the provided seed. Lower limits expose Codex to fewer snippets per search and therefore force narrower, more varied retrieval. Higher limits give more local evidence per search but can make repeated broad terms dominate.
+
+The server watches Codex tool calls. If a `searchTopicSource.mjs` command omits or changes the required `--context`, `--limit`, or `--seed` flags, the generation fails as a source-search contract violation.
 
 The generator must record the regexes it used in each question's `sourceSearchTerms`.
 
@@ -89,11 +94,28 @@ Forbidden source access includes direct reads of raw PDFs, extracted source fold
 
 Generated questions should include grounding and coverage metadata:
 
+- `blueprintSlotId`: the exact primary or backup slot used.
+- `blueprintTarget`: the assigned slot target restated briefly.
+- `blueprintStatus`: `primary` or `backup`.
+- `blueprintReplacementReason`: required when a backup slot replaces a weak primary slot.
 - `courseSection`: the blueprint section the question is meant to cover.
 - `sourceSearchTerms`: regex searches used to find relevant source evidence.
 - `sourceEvidence`: short source-grounding snippets or source references supporting the question.
 
 This metadata is not just descriptive. It is used by audits to verify that questions were intentionally grounded and that the exam is not over-concentrated in a few familiar concepts.
+
+## Deterministic Coverage Blueprint
+
+The server, not Codex, chooses the question slots. The blueprint contains:
+
+- primary slots, one per intended question
+- backup slots, used only when source search shows a primary slot is weak
+- assigned `courseSection`, target, intended type, exam-worthiness label, and search hints
+- section allocation counts and generation settings
+
+The allocation is seeded. The same course context, generated-history state, real-exam style profile, and seed produce the same blueprint. A different seed can change slot order and weighted selections.
+
+The allocator gives each course section a floor when there are enough questions, caps per-section dominance, downweights sections that are already heavily represented in generated history, and still weights toward testable objectives instead of low-yield course-administration fluff. Codex can reject a weak primary slot, but only by using a precomputed backup slot and explaining why.
 
 ## Audits
 
@@ -105,6 +127,10 @@ Draft and final audits can check:
 - question count and type mix
 - answer-key mirrors
 - image paths and image tags
+- missing or invalid blueprint slots
+- omitted primary slots without backup replacements
+- backup slots used without replacement reasons
+- course-section mismatch against blueprint slots
 - missing `courseSection`
 - missing source evidence
 - course-section coverage
@@ -131,6 +157,7 @@ The UI shows a compact live feed for humans, but the JSONL file is the durable a
 Typical log events include:
 
 - `job_started`
+- `coverage_blueprint_created`
 - `ui_log`
 - `codex_thread_started`
 - `codex_turn_input`
@@ -149,7 +176,14 @@ The current design avoids that by using generated history only as machine-readab
 
 ## Tuning Levers
 
-The useful knobs are mostly programmatic:
+The pre-generation modal exposes the first practical knobs:
+
+- `seed`: deterministic coverage/search seed
+- `search limit`: maximum sampled hits returned by each regex source search
+- `search context`: source lines before/after each hit
+- `coverage randomness`: how much the blueprint allocator lets seeded randomness perturb deterministic section weights
+
+Additional useful knobs are mostly programmatic:
 
 - course-section coverage thresholds
 - maximum questions per section

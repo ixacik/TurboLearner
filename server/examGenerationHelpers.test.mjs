@@ -6,10 +6,13 @@ import test from 'node:test'
 import {
   assertGeneratedChoiceAnswerDistribution,
   assertGeneratedMultiSelectAnswerVariety,
+  buildExamBlueprint,
   buildExamDraftGenerationPrompt,
   buildExamReviewPrompt,
   buildGeneratedExamProgrammaticFeedback,
   createExamGenerationPromptContext,
+  normalizeExamGenerationSettings,
+  sourceSearchSettingsViolation,
 } from './examGenerationHelpers.mjs'
 import { buildQuestionSetLatex, sanitizePdfFileName } from './examPdfExport.mjs'
 import {
@@ -256,6 +259,278 @@ test('exam steering prompt is included in both draft and review prompts', () => 
   assert.match(reviewPrompt, /minor technical wording changes/)
   assert.match(draftPrompt, /Shared question-set guidelines:/)
   assert.match(reviewPrompt, /Real exam style examples:/)
+})
+
+const rlCourseContext = [
+  '# Course Scope',
+  '## Covered Topics',
+  '### Probability Support For RL',
+  '- Covered: expectation, variance, entropy, categorical variables, sampling, and conditional probabilities.',
+  '- Expected depth: formula use and metric computation for discrete probabilities and expectations.',
+  '### Multi-Armed Bandits And Exploration',
+  '- Covered: action values, regret, epsilon-greedy, softmax, UCB, optimistic initialization, and incremental means.',
+  '- Expected depth: metric computation and algorithm tracing.',
+  '### Markov Decision Processes',
+  '- Covered: MDP elements, policies, returns, state values, action values, traces, and Bellman equations.',
+  '- Expected depth: compute returns, values, greedy policies, and simple Bellman backups from tables.',
+  '### Dynamic Programming',
+  '- Covered: policy evaluation, policy improvement, policy iteration, value iteration, and Bellman optimality backups.',
+  '- Expected depth: algorithm tracing and backup-diagram interpretation.',
+  '### Model-Free Learning From Experience',
+  '- Covered: Monte Carlo, TD(0), SARSA, Q-learning, Expected SARSA, double learning, and n-step methods.',
+  '- Expected depth: formula use and algorithm tracing for sampled updates.',
+  '### Model-Based Reinforcement Learning',
+  '- Covered: Dyna, RTDP, prioritized sweeping, sample models, distribution models, and count-based model estimation.',
+  '- Expected depth: algorithm tracing and implementation awareness.',
+  '### Function Approximation',
+  '- Covered: value approximation, Gradient Monte Carlo, Gradient TD(0), state aggregation, linear features, coarse coding, and neural networks.',
+  '- Expected depth: formula recognition/use and implementation awareness.',
+  '### Policy-Based RL',
+  '- Covered: policy gradients, softmax preferences, REINFORCE, baselines, actor-critic, and advantages.',
+  '- Expected depth: formula recognition and conceptual tracing.',
+  '### AlphaGo And Applications',
+  '- Covered: MCTS, policy prior, rollout policy, value network, behavior cloning, self-play, and AlphaGo Zero.',
+  '- Expected depth: conceptual synthesis and architecture tracing.',
+].join('\n')
+
+function rlPromptContext(extraSets = []) {
+  return createExamGenerationPromptContext({
+    ...baseBank,
+    courseContext: rlCourseContext,
+    sets: [
+      ...baseBank.sets,
+      ...extraSets,
+    ],
+  })
+}
+
+function generatedHistorySet(section, count) {
+  return {
+    id: `generated-history-${section.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+    title: 'Generated History',
+    sourceType: 'generated',
+    questions: Array.from({ length: count }, (_, index) => question({
+      id: `history-${index + 1}`,
+      prompt: `${section} repeated generated history angle ${index + 1}.`,
+      courseSection: section,
+    })),
+  }
+}
+
+test('exam blueprint generation is deterministic for the same seed', () => {
+  const promptContext = rlPromptContext()
+  const settings = normalizeExamGenerationSettings({
+    seed: 'blueprint-seed',
+    searchLimit: 5,
+    searchContext: 9,
+    coverageRandomness: 80,
+  }, 'fallback')
+
+  const first = buildExamBlueprint({ examId: 'generated-test', promptContext, settings, questionCount: 16 })
+  const second = buildExamBlueprint({ examId: 'generated-test', promptContext, settings, questionCount: 16 })
+
+  assert.deepEqual(first.primarySlots, second.primarySlots)
+  assert.deepEqual(first.backupSlots, second.backupSlots)
+  assert.equal(first.settings.seed, 'blueprint-seed')
+})
+
+test('exam blueprint seed changes the coverage order', () => {
+  const promptContext = rlPromptContext()
+  const first = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext,
+    settings: { seed: 'seed-a', coverageRandomness: 100 },
+    questionCount: 18,
+  })
+  const second = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext,
+    settings: { seed: 'seed-b', coverageRandomness: 100 },
+    questionCount: 18,
+  })
+
+  assert.notDeepEqual(
+    first.primarySlots.map((slot) => `${slot.courseSection}:${slot.target}`),
+    second.primarySlots.map((slot) => `${slot.courseSection}:${slot.target}`),
+  )
+})
+
+test('exam blueprint covers each course section when there is room', () => {
+  const promptContext = rlPromptContext()
+  const blueprint = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext,
+    settings: { seed: 'floor-seed', coverageRandomness: 0 },
+    questionCount: promptContext.courseSections.length,
+  })
+
+  assert.deepEqual(
+    new Set(blueprint.primarySlots.map((slot) => slot.courseSection)),
+    new Set(promptContext.courseSections.map((section) => section.title)),
+  )
+})
+
+test('exam blueprint caps dominant sections and produces backup slots', () => {
+  const blueprint = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext: rlPromptContext(),
+    settings: { seed: 'cap-seed', coverageRandomness: 50 },
+    questionCount: 30,
+  })
+  const counts = Object.values(blueprint.sectionAllocation)
+
+  assert.equal(blueprint.primarySlots.length, 30)
+  assert.equal(Math.max(...counts), 5)
+  assert.ok(blueprint.backupSlots.length >= 3)
+  assert.ok(blueprint.backupSlots.every((slot) => slot.id.startsWith('backup-')))
+})
+
+test('exam blueprint boosts historically undercovered sections', () => {
+  const promptContext = rlPromptContext([
+    generatedHistorySet('Model-Free Learning From Experience', 18),
+  ])
+  const blueprint = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext,
+    settings: { seed: 'debt-seed', coverageRandomness: 0 },
+    questionCount: 24,
+  })
+
+  const modelFreeCount = blueprint.sectionAllocation['Model-Free Learning From Experience']
+  const strongestUndercoveredCount = Math.max(
+    ...Object.entries(blueprint.sectionAllocation)
+      .filter(([section]) => section !== 'Model-Free Learning From Experience')
+      .map(([, count]) => count),
+  )
+  assert.ok(strongestUndercoveredCount > modelFreeCount)
+})
+
+test('draft prompt includes deterministic blueprint and forced source-search settings', () => {
+  const promptContext = rlPromptContext()
+  const settings = normalizeExamGenerationSettings({
+    seed: 'prompt-seed',
+    searchLimit: 5,
+    searchContext: 7,
+    coverageRandomness: 65,
+  }, 'generated-test')
+  const examBlueprint = buildExamBlueprint({ examId: 'generated-test', promptContext, settings, questionCount: 8 })
+  const prompt = buildExamDraftGenerationPrompt({
+    topicId: 'introduction-to-rl',
+    examId: 'generated-test',
+    examAssetDir: '/tmp/generated-test',
+    outputPath: '/tmp/generated-test/draft-question-set.json',
+    sourceManifest: {
+      sourceAccessMode: 'internal-search-only',
+      instructions: 'Use only the internal search command below for course-source grounding. Do not inspect source files directly.',
+      internalSearch: {
+        commandTemplate: 'node scripts/searchTopicSource.mjs introduction-to-rl "<regex>" --context 7 --limit 5 --seed prompt-seed',
+        topicId: 'introduction-to-rl',
+        searchSettings: settings,
+        corpus: { exists: true, sourceCount: 4, lineCount: 200, sizeBytes: 5000 },
+      },
+      availableSources: [{ name: 'lecture.pdf', sourceKind: 'lecture', extension: '.pdf' }],
+    },
+    failedFiles: [],
+    promptContext,
+    examBlueprint,
+    generationSettings: settings,
+  })
+
+  assert.match(prompt, /Deterministic coverage blueprint:/)
+  assert.match(prompt, /Do not create your own topic mix/)
+  assert.match(prompt, /blueprintSlotId/)
+  assert.match(prompt, /--context 7 --limit 5 --seed prompt-seed/)
+  assert.match(prompt, /Preserve every required flag/)
+})
+
+test('programmatic draft audit enforces blueprint metadata and section matches', () => {
+  const promptContext = rlPromptContext()
+  const examBlueprint = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext,
+    settings: { seed: 'audit-seed' },
+    questionCount: 2,
+  })
+  const [slot] = examBlueprint.primarySlots
+  const feedback = buildGeneratedExamProgrammaticFeedback({
+    questions: [
+      question({
+        id: 'generated-q1',
+        number: '1',
+        courseSection: slot.courseSection,
+        sourceSearchTerms: ['policy'],
+        sourceEvidence: [{ source: 'lecture.pdf', page: 3, note: 'evidence' }],
+      }),
+      question({
+        id: 'generated-q2',
+        number: '2',
+        courseSection: 'Wrong Section',
+        blueprintSlotId: slot.id,
+        blueprintTarget: slot.target,
+        blueprintStatus: 'primary',
+        sourceSearchTerms: ['policy'],
+        sourceEvidence: [{ source: 'lecture.pdf', page: 4, note: 'evidence' }],
+      }),
+    ],
+  }, {
+    ...promptContext,
+    examBlueprint,
+    requireSourceEvidence: true,
+  })
+
+  assert.equal(feedback.hasIssues, true)
+  assert.equal(feedback.issues.some((issue) => issue.code === 'blueprint-slot-missing-metadata'), true)
+  assert.equal(feedback.issues.some((issue) => issue.code === 'blueprint-course-section-mismatch'), true)
+  assert.match(feedback.text, /Blueprint slot counts:/)
+})
+
+test('programmatic draft audit accepts a complete primary blueprint set', () => {
+  const promptContext = rlPromptContext()
+  const examBlueprint = buildExamBlueprint({
+    examId: 'generated-test',
+    promptContext,
+    settings: { seed: 'pass-seed' },
+    questionCount: 3,
+  })
+  const questions = examBlueprint.primarySlots.map((slot, index) => question({
+    id: `generated-q${index + 1}`,
+    number: String(index + 1),
+    courseSection: slot.courseSection,
+    blueprintSlotId: slot.id,
+    blueprintTarget: slot.target,
+    blueprintStatus: 'primary',
+    sourceSearchTerms: slot.searchHints,
+    sourceEvidence: [{ source: 'lecture.pdf', page: index + 1, note: 'evidence' }],
+  }))
+
+  const feedback = buildGeneratedExamProgrammaticFeedback({ questions }, {
+    ...promptContext,
+    examBlueprint,
+    requireSourceEvidence: true,
+  })
+
+  assert.equal(feedback.issues.some((issue) => issue.code.startsWith('blueprint-')), false)
+})
+
+test('source search settings validation catches missing or wrong required flags', () => {
+  const settings = normalizeExamGenerationSettings({
+    seed: 'search-seed',
+    searchLimit: 5,
+    searchContext: 7,
+  }, 'fallback')
+
+  assert.equal(
+    sourceSearchSettingsViolation('node scripts/searchTopicSource.mjs introduction-to-rl "Dyna " --context 7 --limit 5 --seed search-seed', settings),
+    '',
+  )
+  assert.match(
+    sourceSearchSettingsViolation('node scripts/searchTopicSource.mjs introduction-to-rl "Dyna " --context 20 --limit 5 --seed search-seed', settings),
+    /expected --context 7/,
+  )
+  assert.match(
+    sourceSearchSettingsViolation('node scripts/searchTopicSource.mjs introduction-to-rl "Dyna " --context 7 --limit 5', settings),
+    /expected --seed search-seed/,
+  )
 })
 
 test('PDF export latex renders math tags and raw formula options', () => {

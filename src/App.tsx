@@ -40,6 +40,7 @@ import {
   FolderPlus,
   MessageSquareQuote,
   NotebookText,
+  RefreshCw,
   X,
 } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
@@ -316,6 +317,14 @@ type ExamGenerationLogEntry = {
   detail?: string
 }
 
+type ExamGenerationSettings = {
+  seed: string
+  searchLimit: number
+  searchContext: number
+  coverageRandomness: number
+  coverageMode: 'hybrid-weighted'
+}
+
 type ExamGenerationState = {
   status: ExamGenerationStatus
   phase: string
@@ -328,6 +337,7 @@ type ExamGenerationState = {
   generatedExamTitle: string | null
   questionCount: number
   steeringPrompt: string
+  settings: ExamGenerationSettings | null
   log: ExamGenerationLogEntry[]
   logPath: string | null
   logUrl: string | null
@@ -435,6 +445,13 @@ const emptyHistoryItems: HistoryItem[] = []
 const emptyAnswersByQuestion: Record<string, AnswerPayload> = {}
 const emptyRevealedCorrectOptionIdsByQuestion: Record<string, string[]> = {}
 const emptyTutorMessages: TutorMessage[] = []
+const defaultExamGenerationSettings: ExamGenerationSettings = {
+  seed: '',
+  searchLimit: 8,
+  searchContext: 12,
+  coverageRandomness: 70,
+  coverageMode: 'hybrid-weighted',
+}
 const emptyExamGenerationState: ExamGenerationState = {
   status: 'idle',
   phase: '',
@@ -447,6 +464,7 @@ const emptyExamGenerationState: ExamGenerationState = {
   generatedExamTitle: null,
   questionCount: 0,
   steeringPrompt: '',
+  settings: null,
   log: [],
   logPath: null,
   logUrl: null,
@@ -1632,7 +1650,10 @@ function App() {
     }
   }, [applyCourseContextState, refreshTopics, selectedTopicId])
 
-  const startExamGeneration = useCallback(async (steeringPrompt = '') => {
+  const startExamGeneration = useCallback(async (
+    steeringPrompt = '',
+    settings: ExamGenerationSettings = createDefaultExamGenerationSettings(),
+  ) => {
     if (!selectedTopicId) return
     try {
       setIsExamSteeringModalOpen(false)
@@ -1640,7 +1661,7 @@ function App() {
       const response = await fetch(`/api/topics/${selectedTopicId}/exam-generation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ steeringPrompt }),
+        body: JSON.stringify({ steeringPrompt, settings }),
       })
       if (!response.ok) throw new Error(await response.text())
       applyExamGenerationState(await response.json() as ExamGenerationState)
@@ -3879,15 +3900,35 @@ const DeleteExamModal = memo(function DeleteExamModal({
   )
 })
 
+function createDefaultExamGenerationSettings(): ExamGenerationSettings {
+  return {
+    ...defaultExamGenerationSettings,
+    seed: randomExamGenerationSeed(),
+  }
+}
+
+function randomExamGenerationSeed() {
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+}
+
+function sanitizeExamGenerationSeed(value: string) {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+}
+
 const ExamSteeringModal = memo(function ExamSteeringModal({
   onCancel,
   onStart,
 }: {
   onCancel: () => void
-  onStart: (steeringPrompt: string) => void | Promise<void>
+  onStart: (steeringPrompt: string, settings: ExamGenerationSettings) => void | Promise<void>
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [steeringPrompt, setSteeringPrompt] = useState('')
+  const [settings, setSettings] = useState<ExamGenerationSettings>(() => createDefaultExamGenerationSettings())
   const [isStarting, setIsStarting] = useState(false)
 
   useEffect(() => {
@@ -3899,11 +3940,15 @@ const ExamSteeringModal = memo(function ExamSteeringModal({
     if (isStarting) return
     try {
       setIsStarting(true)
-      await Promise.resolve(onStart(steeringPrompt))
+      await Promise.resolve(onStart(steeringPrompt, settings))
     } catch {
       setIsStarting(false)
     }
-  }, [isStarting, onStart, steeringPrompt])
+  }, [isStarting, onStart, settings, steeringPrompt])
+
+  const updateSetting = useCallback((key: keyof ExamGenerationSettings, value: string | number) => {
+    setSettings((current) => ({ ...current, [key]: value }) as ExamGenerationSettings)
+  }, [])
 
   return (
     <div
@@ -3942,6 +3987,71 @@ const ExamSteeringModal = memo(function ExamSteeringModal({
             onChange={(event) => setSteeringPrompt(event.currentTarget.value)}
           />
         </label>
+
+        <section className="exam-generation-settings" aria-label="Generation settings">
+          <div className="exam-generation-settings-header">
+            <span>Advanced</span>
+            <button
+              className="ghost-button icon-text-button"
+              type="button"
+              disabled={isStarting}
+              onClick={() => updateSetting('seed', randomExamGenerationSeed())}
+            >
+              <RefreshCw aria-hidden="true" size={15} />
+              New seed
+            </button>
+          </div>
+
+          <label className="exam-setting-field">
+            <span>Seed</span>
+            <input
+              type="text"
+              value={settings.seed}
+              maxLength={64}
+              disabled={isStarting}
+              onChange={(event) => updateSetting('seed', sanitizeExamGenerationSeed(event.currentTarget.value))}
+            />
+          </label>
+
+          <label className="exam-setting-field">
+            <span>Search limit <strong>{settings.searchLimit}</strong></span>
+            <input
+              type="range"
+              min={3}
+              max={30}
+              step={1}
+              value={settings.searchLimit}
+              disabled={isStarting}
+              onChange={(event) => updateSetting('searchLimit', Number(event.currentTarget.value))}
+            />
+          </label>
+
+          <label className="exam-setting-field">
+            <span>Search context <strong>{settings.searchContext}</strong></span>
+            <input
+              type="range"
+              min={4}
+              max={40}
+              step={1}
+              value={settings.searchContext}
+              disabled={isStarting}
+              onChange={(event) => updateSetting('searchContext', Number(event.currentTarget.value))}
+            />
+          </label>
+
+          <label className="exam-setting-field">
+            <span>Coverage randomness <strong>{settings.coverageRandomness}</strong></span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={settings.coverageRandomness}
+              disabled={isStarting}
+              onChange={(event) => updateSetting('coverageRandomness', Number(event.currentTarget.value))}
+            />
+          </label>
+        </section>
 
         <footer className="context-modal-actions">
           <button className="secondary-button" type="button" disabled={isStarting} onClick={onCancel}>
@@ -4028,6 +4138,15 @@ const ExamGenerationModal = memo(function ExamGenerationModal({
           <section className="exam-steering-preview" aria-label="Exam steering prompt">
             <span>Steering prompt</span>
             <p>{generation.steeringPrompt}</p>
+          </section>
+        )}
+
+        {generation.settings && (
+          <section className="exam-settings-preview" aria-label="Exam generation settings">
+            <span>Settings</span>
+            <p>
+              seed {generation.settings.seed} · limit {generation.settings.searchLimit} · context {generation.settings.searchContext} · randomness {generation.settings.coverageRandomness}
+            </p>
           </section>
         )}
 

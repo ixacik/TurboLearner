@@ -13,9 +13,13 @@ import {
   assertGeneratedChoiceAnswerDistribution,
   assertGeneratedMultiSelectAnswerVariety,
   buildExamDraftGenerationPrompt,
+  buildExamBlueprint,
   buildGeneratedExamProgrammaticFeedback,
   buildExamReviewPrompt,
   createExamGenerationPromptContext,
+  defaultExamGenerationSettings,
+  normalizeExamGenerationSettings,
+  sourceSearchSettingsViolation,
 } from './examGenerationHelpers.mjs'
 import { buildQuestionSetLatex, sanitizePdfFileName } from './examPdfExport.mjs'
 import {
@@ -371,6 +375,7 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
     }
     const jobId = randomUUID()
     const examId = nextGeneratedExamId()
+    const generationSettings = normalizeExamGenerationSettings(req.body?.settings, examId)
     const logPath = topicExamGenerationLogPath(topicId, jobId, examId)
     const initialLogEntry = examGenerationLogEntry('status', 'Queued exam generation.')
     topicExamGenerationJobs.set(topicId, jobId)
@@ -386,6 +391,7 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
       error: null,
       resultId: null,
       steeringPrompt,
+      settings: generationSettings,
       logPath,
     })
     appendPersistentGenerationLog(logPath, {
@@ -395,6 +401,7 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
       examId,
       phase: 'Queued',
       steeringPrompt,
+      generationSettings,
     })
     appendPersistentGenerationLog(logPath, {
       type: 'ui_log',
@@ -403,7 +410,7 @@ app.post('/api/topics/:topicId/exam-generation', (req, res) => {
       examId,
       entry: initialLogEntry,
     })
-    void generatePersistentExamForTopic(topicId, jobId, steeringPrompt, examId)
+    void generatePersistentExamForTopic(topicId, jobId, steeringPrompt, examId, generationSettings)
     res.status(202).json(publicTopicExamGenerationState(topicId))
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
@@ -1493,6 +1500,7 @@ function initializeDatabase() {
       error TEXT,
       result_id TEXT,
       steering_prompt TEXT NOT NULL DEFAULT '',
+      settings_json TEXT NOT NULL DEFAULT '{}',
       log_path TEXT
     );
 
@@ -1544,6 +1552,9 @@ function ensureGenerationJobColumns(database) {
   }
   if (!columns.has('log_path')) {
     database.exec('ALTER TABLE generation_jobs ADD COLUMN log_path TEXT')
+  }
+  if (!columns.has('settings_json')) {
+    database.exec("ALTER TABLE generation_jobs ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'")
   }
 }
 
@@ -2525,7 +2536,8 @@ function prepareTopicContextSourceManifest(topicId) {
   }
 }
 
-function prepareTopicExamSourceManifest(topicId, examAssetDir) {
+function prepareTopicExamSourceManifest(topicId, examAssetDir, generationSettings = defaultExamGenerationSettings) {
+  const settings = normalizeExamGenerationSettings(generationSettings, topicId)
   const materialDir = path.join(examAssetDir, 'source-material')
   const rows = topicSourceRows(topicId)
     .filter((row) => row.stored_path && fs.existsSync(row.stored_path))
@@ -2563,8 +2575,9 @@ function prepareTopicExamSourceManifest(topicId, examAssetDir) {
     sourceAccessMode: 'internal-search-only',
     instructions: 'Use only the internal search command below for course-source grounding. Do not inspect source files directly.',
     internalSearch: {
-      commandTemplate: `node scripts/searchTopicSource.mjs ${topicId} "<regex>" --context 20 --limit 30`,
+      commandTemplate: `node scripts/searchTopicSource.mjs ${topicId} "<regex>" --context ${settings.searchContext} --limit ${settings.searchLimit} --seed ${settings.seed}`,
       topicId,
+      searchSettings: settings,
       corpus: {
         exists: corpusSummary.exists,
         sourceCount: corpusSummary.sourceCount,
@@ -2688,11 +2701,26 @@ function legacyContextFilesForTopic(topicId) {
   }))
 }
 
-function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt, completedAt, error, resultId, steeringPrompt = '', logPath = null }) {
+function upsertGenerationJob({
+  id,
+  topicId,
+  type,
+  status,
+  phase,
+  log,
+  startedAt,
+  completedAt,
+  error,
+  resultId,
+  steeringPrompt = '',
+  settings = defaultExamGenerationSettings,
+  logPath = null,
+}) {
+  const normalizedSettings = normalizeExamGenerationSettings(settings, id)
   db.prepare(`
     INSERT INTO generation_jobs (
-      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id, steering_prompt, log_path
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, topic_id, type, status, phase, log_json, started_at, completed_at, error, result_id, steering_prompt, settings_json, log_path
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
       phase = excluded.phase,
@@ -2701,6 +2729,7 @@ function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt,
       error = excluded.error,
       result_id = excluded.result_id,
       steering_prompt = excluded.steering_prompt,
+      settings_json = excluded.settings_json,
       log_path = excluded.log_path
   `).run(
     id,
@@ -2714,6 +2743,7 @@ function upsertGenerationJob({ id, topicId, type, status, phase, log, startedAt,
     error,
     resultId,
     normalizeExamSteeringPrompt(steeringPrompt),
+    JSON.stringify(normalizedSettings),
     typeof logPath === 'string' && logPath.trim() ? logPath : null,
   )
 }
@@ -2739,6 +2769,7 @@ function getActiveGenerationJob(topicId, type) {
     error: row.error,
     resultId: row.result_id,
     steeringPrompt: row.steering_prompt ?? '',
+    settings: normalizeExamGenerationSettings(parseJson(row.settings_json, {}), row.id),
     logPath: row.log_path ?? null,
   }
 }
@@ -2770,6 +2801,7 @@ function publicTopicExamGenerationState(topicId) {
     generatedExamTitle: set?.title ?? null,
     questionCount: set?.questions?.length ?? 0,
     steeringPrompt: job.steeringPrompt ?? '',
+    settings: job.settings ?? null,
     log: normalizeExamGenerationLog(job.log),
     logPath: publicGenerationLogPath(job.logPath),
     logUrl: job.logPath ? `/api/topics/${encodeURIComponent(topicId)}/exam-generation/log` : null,
@@ -3076,6 +3108,7 @@ function emptyExamGenerationState() {
     generatedExamTitle: null,
     questionCount: 0,
     steeringPrompt: '',
+    settings: null,
     log: [],
     logPath: null,
     logUrl: null,
@@ -3411,13 +3444,20 @@ async function generatePersistentContextForTopic(topicId, jobId) {
   }
 }
 
-async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '', examId = nextGeneratedExamId()) {
+async function generatePersistentExamForTopic(
+  topicId,
+  jobId,
+  steeringPrompt = '',
+  examId = nextGeneratedExamId(),
+  generationSettings = defaultExamGenerationSettings,
+) {
+  const settings = normalizeExamGenerationSettings(generationSettings, examId)
   const examAssetDir = path.join(topicPath(topicId), 'generated-assets', examId)
   try {
     setTopicExamGenerationPhase(topicId, jobId, 'Reading topic sources')
     const failedFiles = topicFailedSourceFiles(topicId)
     fs.mkdirSync(examAssetDir, { recursive: true })
-    const sourceManifest = prepareTopicExamSourceManifest(topicId, examAssetDir)
+    const sourceManifest = prepareTopicExamSourceManifest(topicId, examAssetDir, settings)
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
     if (!sourceManifest) {
       throw new Error([
@@ -3432,8 +3472,33 @@ async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '
     }
     const baseBank = topicQuestionBank(topicId)
     const promptContext = createExamGenerationPromptContext(baseBank)
+    const examBlueprint = buildExamBlueprint({
+      examId,
+      promptContext,
+      settings,
+    })
+    const blueprintPath = path.join(examAssetDir, 'exam-blueprint.json')
+    fs.writeFileSync(blueprintPath, `${JSON.stringify(examBlueprint, null, 2)}\n`)
+    appendPersistentGenerationLog(getActiveGenerationJob(topicId, 'exam')?.logPath, {
+      type: 'coverage_blueprint_created',
+      topicId,
+      jobId,
+      examId,
+      blueprintPath,
+      generationSettings: settings,
+      questionCount: examBlueprint.questionCount,
+      sectionAllocation: examBlueprint.sectionAllocation,
+    })
+    appendTopicExamGenerationLog(
+      topicId,
+      jobId,
+      'status',
+      'Created deterministic coverage blueprint.',
+      `${examBlueprint.questionCount} slots; ${Object.keys(examBlueprint.sectionAllocation).length} course sections.`,
+    )
     const auditContext = {
       ...promptContext,
+      examBlueprint,
       requireSourceEvidence: true,
       sourceAccessMode: 'internal-search-only',
     }
@@ -3449,6 +3514,8 @@ async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '
       failedFiles,
       promptContext,
       steeringPrompt,
+      examBlueprint,
+      generationSettings: settings,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
@@ -3468,6 +3535,8 @@ async function generatePersistentExamForTopic(topicId, jobId, steeringPrompt = '
       draftSet,
       programmaticFeedback: programmaticFeedback.text,
       steeringPrompt,
+      examBlueprint,
+      generationSettings: settings,
     })
     if (topicExamGenerationJobs.get(topicId) !== jobId) return
 
@@ -3515,10 +3584,13 @@ async function generateExamDraftWithCodex(jobId, {
   promptContext,
   codeExampleFiles = [],
   steeringPrompt = '',
+  examBlueprint = null,
+  generationSettings = defaultExamGenerationSettings,
 }) {
   return runExamCodexTurn(jobId, {
     topicId,
     phaseLabel: 'Draft',
+    generationSettings,
     developerInstructions: `
 You generate high-quality TurboLearner exam question set drafts from course lecture material.
 For image-based questions, use Codex's built-in image generation capability through the imagegen skill / image_gen tool when available.
@@ -3538,6 +3610,8 @@ When an output path is provided, write the draft question set JSON to that file 
       promptContext,
       codeExampleFiles,
       steeringPrompt,
+      examBlueprint,
+      generationSettings,
     }),
   })
 }
@@ -3556,10 +3630,13 @@ async function reviewAndRepairGeneratedExamWithCodex(jobId, {
   draftSet,
   programmaticFeedback = null,
   steeringPrompt = '',
+  examBlueprint = null,
+  generationSettings = defaultExamGenerationSettings,
 }) {
   return runExamCodexTurn(jobId, {
     topicId,
     phaseLabel: 'Review',
+    generationSettings,
     developerInstructions: `
 You are a strict TurboLearner exam reviewer and editor.
 Review the draft against retrieved lecture evidence, real-exam style examples, and the course context coverage map.
@@ -3584,6 +3661,8 @@ When an output path is provided, write the corrected final question set JSON to 
       draftSet,
       programmaticFeedback,
       steeringPrompt,
+      examBlueprint,
+      generationSettings,
     }),
   })
 }
@@ -3595,7 +3674,13 @@ function programmaticFeedbackLogMessage(feedback) {
     : 'Programmatic draft audit found no blocking issues.'
 }
 
-async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerInstructions, prompt }) {
+async function runExamCodexTurn(jobId, {
+  topicId = null,
+  phaseLabel,
+  developerInstructions,
+  prompt,
+  generationSettings = defaultExamGenerationSettings,
+}) {
   const thread = await codex.request('thread/start', {
     cwd: appRoot,
     approvalPolicy: 'never',
@@ -3660,12 +3745,16 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
       if (message.method === 'item/started') {
         const violation = forbiddenExamSourceAccessMessage(message.params?.item)
         if (topicId && violation) sourceAccessViolations.push(violation)
+        const settingsViolation = sourceSearchSettingsViolation(summarizeCodexItemDetail(message.params?.item), generationSettings)
+        if (topicId && settingsViolation) sourceAccessViolations.push(settingsViolation)
         if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
         else appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Started'), summarizeCodexItemDetail(message.params?.item))
       }
       if (message.method === 'item/completed') {
         const violation = forbiddenExamSourceAccessMessage(message.params?.item)
         if (topicId && violation) sourceAccessViolations.push(violation)
+        const settingsViolation = sourceSearchSettingsViolation(summarizeCodexItemDetail(message.params?.item), generationSettings)
+        if (topicId && settingsViolation) sourceAccessViolations.push(settingsViolation)
         if (topicId) appendTopicExamGenerationLog(topicId, jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
         else appendExamGenerationLog(jobId, 'tool', summarizeCodexItem(message.params?.item, 'Completed'), summarizeCodexItemDetail(message.params?.item))
       }
@@ -3682,7 +3771,7 @@ async function runExamCodexTurn(jobId, { topicId = null, phaseLabel, developerIn
       violations: uniqueStrings(sourceAccessViolations),
     })
     throw new Error([
-      'Codex attempted to inspect course source material outside the internal source search tool.',
+      'Codex violated the internal source-search contract.',
       ...uniqueStrings(sourceAccessViolations).slice(0, 8).map((violation) => `- ${violation}`),
     ].join('\n'))
   }
@@ -3819,6 +3908,10 @@ function normalizeGeneratedQuestion(question, examId, index) {
     ...(groupPrompt ? { groupPrompt } : {}),
     ...(Number.isInteger(question.groupOrder) ? { groupOrder: question.groupOrder } : {}),
     ...(Array.isArray(question.concepts) ? { concepts: question.concepts.map((concept) => stableId(concept, 'concept')).filter(Boolean) } : { concepts: [] }),
+    ...(typeof question.blueprintSlotId === 'string' && question.blueprintSlotId.trim() ? { blueprintSlotId: question.blueprintSlotId.trim() } : {}),
+    ...(typeof question.blueprintTarget === 'string' && question.blueprintTarget.trim() ? { blueprintTarget: question.blueprintTarget.trim() } : {}),
+    ...(typeof question.blueprintStatus === 'string' && question.blueprintStatus.trim() ? { blueprintStatus: question.blueprintStatus.trim() } : {}),
+    ...(typeof question.blueprintReplacementReason === 'string' && question.blueprintReplacementReason.trim() ? { blueprintReplacementReason: question.blueprintReplacementReason.trim() } : {}),
     ...(typeof question.courseSection === 'string' && question.courseSection.trim() ? { courseSection: question.courseSection.trim() } : {}),
     ...(Array.isArray(question.sourceSearchTerms) ? { sourceSearchTerms: question.sourceSearchTerms.map(String).map((term) => term.trim()).filter(Boolean) } : {}),
     ...(Array.isArray(question.sourceEvidence) ? { sourceEvidence: normalizeSourceEvidence(question.sourceEvidence) } : {}),
